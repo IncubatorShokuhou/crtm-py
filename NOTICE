@@ -1,0 +1,14 @@
+crtm-py reimplements, in Python, pieces of the Community Radiative Transfer
+Model (CRTM) call sequence used by the NOAA/DTC Unified Post Processor
+(UPP) v4.1, tag dtc_post_v4.1.0, file sorc/ncep_post.fd/CALRAD_WCLOUD_newcrtm.f.
+
+CRTM is developed by the Joint Center for Satellite Data Assimilation
+(JCSDA) and NOAA. UPP is developed by NOAA/EMC and the Developmental
+Testbed Center. Those source programs are not vendored here. Coefficient
+files distributed with CRTM (SpcCoeff, TauCoeff, CloudCoeff, emissivity
+LUTs) are NOAA/JCSDA data, are not included in this repository, and are
+not covered by the MIT license that applies to the Python in this tree.
+
+The brightness temperatures produced by this version do not reproduce
+CRTM. Gas optical depth is a synthetic grey gas and cloud extinction is
+geometric optics. See README.md.
