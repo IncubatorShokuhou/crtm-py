@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crtm-py"
-version = "0.1.0"
+version = "0.1.1"
 description = "Pure-Python CRTM forward path for UPP v4.1 WRF-ARW ABI brightness temperature"
 readme = "README.md"
 requires-python = ">=3.10"

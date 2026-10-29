@@ -38,4 +38,4 @@ __all__ = [
     "set_coeff_path",
     "surface_from_upp",
 ]
-__version__ = "0.1.0"
+__version__ = "0.1.1"

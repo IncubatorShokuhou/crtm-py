@@ -2,13 +2,13 @@
 
 UPP v4.1 里 WRF-ARW 模拟卫星亮温用的 CRTM 前向过程，纯 Python / NumPy 重写。对齐 NOAA-EMC/UPP 标签 `dtc_post_v4.1.0` 的 `sorc/ncep_post.fd/CALRAD_WCLOUD_newcrtm.f`。传感器是 GOES-16/17 ABI 红外通道 7–16（`abi_g16`、`abi_g17`；UPP 在找不到 `abi_g16.SpcCoeff.bin` 时退回 `abi_gr`）。
 
-给 [upp-py](https://github.com/IncubatorShokuhou/upp-py) 做可选依赖。安装名是 `crtm-py`，导入名是 `crtm_py`，版本 `0.1.0`。`upp-py[bt]` 以后可以写：
+给 [upp-py](https://github.com/IncubatorShokuhou/upp-py) 做可选依赖。安装名是 `crtm-py`，导入名是 `crtm_py`，版本 `0.1.1`。`upp-py[bt]` 以后可以写：
 
 ```text
 crtm-py @ git+https://github.com/IncubatorShokuhou/crtm-py
 ```
 
-打上 `v0.1.0` 标签之后，把 URL 末尾改成 `@v0.1.0`。发到 PyPI 之后则是 `crtm-py>=0.1`。
+打上 `v0.1.1` 标签之后，把 URL 末尾改成 `@v0.1.1`。发到 PyPI 之后则是 `crtm-py>=0.1.1`。从 git 分支安装时版本号要变，否则 pip 可能沿用已经装过的 `0.1.0`。
 
 **English.** Pure-Python / NumPy port of the CRTM forward path UPP v4.1 uses for WRF-ARW ABI infrared brightness temperature. With official coefficients, ABI G16 channels 7–16 stay within 0.001 K of gfortran `libcrtm` (REAL64) on the CRTM clear-sky profile, including 60° zenith, land, liquid cloud and ice over liquid. Without coefficient files the package still runs a synthetic grey gas. A 199×199 field with liquid cloud in every column, scattering on, takes about 83 s on one thread (`chunk_size=256`).
 
@@ -131,7 +131,7 @@ https://bin.ssec.wisc.edu/pub/s4/CRTM/file/crtm_coefficients_jedi_release_2.4.0.
 
 `brightness_temperature` 和 `ForwardModel.run` 按 `chunk_size` 分块，缺省 256 列。一块里的柱、通道、层在同一个数组里算气体光学厚度、发射率、Planck 和无散射发射。系数读一次，插值节点留在缓存里。
 
-云水不超过 1e-6 kg/m² 的层不查 `CloudCoeff`。单次散射反照率不超过 1e-10 的层用对角的发射算子。整柱都没有散射时走无散射的发射公式。一块里要散射的层叠成 `numpy.linalg.eig`，单次调用最多 8192 个矩阵。`HH` 不对称，本征值是实数。排好序之后和 `ASYMTX` 大约差 1e-12，本征向量差一个比例。加层用的反射率和透过率不看这个比例。传感器天顶角落在高斯节点上时，那一柱仍用逐柱的 `ASYMTX`。
+云水不超过 1e-6 kg/m² 的层不查 `CloudCoeff`。单次散射反照率不超过 1e-10 的层用对角的发射算子。整柱都没有散射时走无散射的发射公式。Legendre 流数按这一列自己的最大有效半径和该通道的波数算，和逐列的 `layer_cloud_optics` 一样。同一块里流数相同的通道放在一起做本征分解。半径只在小于等于 0 时换成云表的第一个节点，这个替换不参与流数。一块里要散射的层叠成 `numpy.linalg.eig`，单次调用最多 8192 个矩阵。`HH` 不对称，本征值是实数。排好序之后和 `ASYMTX` 大约差 1e-12，本征向量差一个比例。加层用的反射率和透过率不看这个比例。传感器天顶角落在高斯节点上时，那一柱仍用逐柱的 `ASYMTX`。
 
 `n_jobs` 缺省 1。大于 1 时用进程池把块分出去。加速来自块里的数组运算。进程数大于 1 时把 `OMP_NUM_THREADS` 设成 1。
 

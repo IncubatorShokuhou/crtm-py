@@ -15,13 +15,20 @@ with water content at or below the CRTM threshold are left out of the
 ``CloudCoeff`` interpolation. Cells whose single-scatter albedo is at or
 below the ADA threshold take the diagonal emission operator. Clear
 columns never enter ``_ada_cloudy``.
+
+The Legendre count is chosen per column and per channel from that
+column's own maximum effective radius, the same rule as
+``layer_cloud_optics``. Columns that share a count are eigen-solved
+together. A positive radius is not raised to the first table node; only
+a non-positive radius is replaced, and that replacement does not feed
+the stream count.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from crtm_py.cloudlut import _DENSITY_INDEX, _LEGENDRE_OFFSET, _WATER_CONTENT_THRESHOLD, n_streams_for_radius
+from crtm_py.cloudlut import _DENSITY_INDEX, _LEGENDRE_OFFSET, _WATER_CONTENT_THRESHOLD
 from crtm_py.constants import EMIS_ICE, EMIS_SNOW
 from crtm_py.lagrange import find_random_index, interp_1d, lagrange_weights
 from crtm_py.odps import (
@@ -436,7 +443,7 @@ def _cloud_fields_points(cloud_coeff, wavenumber, radius, cloud_type, n_leg):
     ke = np.maximum(_gather_points(cloud_coeff.ke_ir[:, :, den], fi, ri, freq_w, rad_w), 0.0)
     w = np.clip(_gather_points(cloud_coeff.w_ir[:, :, den], fi, ri, freq_w, rad_w), 0.0, 1.0)
     if n_leg <= 0:
-        return ke * (1.0 - w), np.zeros_like(w), None
+        return ke, w, None
     offset = _LEGENDRE_OFFSET[n_leg]
     phase = np.zeros(ke.shape + (n_leg + 1,), dtype=np.float64)
     phase[..., 0] = 0.5
@@ -447,55 +454,111 @@ def _cloud_fields_points(cloud_coeff, wavenumber, radius, cloud_type, n_leg):
     return ke, w, phase
 
 
+def _column_max_radius(clouds):
+    """Per-column maximum effective radius, matching ``layer_cloud_optics``.
+
+    A species contributes only when some layer exceeds the water threshold.
+    The maximum is then taken over every layer of that species, including
+    dry ones. Columns do not share a maximum.
+    """
+    max_re = np.zeros(clouds[0].water.shape[0], dtype=np.float64)
+    for cloud in clouds:
+        wet_column = np.any(cloud.water > _WATER_CONTENT_THRESHOLD, axis=1)
+        if not np.any(wet_column):
+            continue
+        column_max = np.max(cloud.radius, axis=1)
+        max_re = np.maximum(max_re, np.where(wet_column, column_max, 0.0))
+    return max_re
+
+
+def _legendre_counts(max_radius, wavenumber):
+    """Legendre terms for each column and channel.
+
+    Same thresholds as :func:`crtm_py.cloudlut.n_streams_for_radius`. A
+    column whose maximum radius is not positive gets 0 on every channel.
+    """
+    mie = 2.0 * np.pi * max_radius[:, None] * np.asarray(wavenumber, dtype=np.float64)[None, :] / 10000.0
+    n_leg = np.full(mie.shape, 6, dtype=np.int64)
+    n_leg = np.where(mie < 1.0, 4, n_leg)
+    n_leg = np.where(mie < 0.01, 2, n_leg)
+    return np.where(max_radius[:, None] > 0.0, n_leg, 0)
+
+
+def _replace_nonpositive_radius(radius, floor):
+    """``Get_Cloud_Opt_IR`` substitutes the first radius node only for re <= 0."""
+    out = np.array(radius, dtype=np.float64, copy=True)
+    out[out <= 0.0] = float(floor)
+    return out
+
+
 def cloud_optics_batch(cloud_coeff, wavenumber, clouds, scattering):
     """Cloud nadir optical depth and phase.
 
     ``wavenumber`` is (n_channel,). Each cloud has ``water`` and ``radius``
-    shaped (n_profile, n_layer). Returns tau (n, c, layer), ssa, phase.
+    shaped (n_profile, n_layer). Returns tau (n, c, layer), ssa, phase, and
+    the Legendre count (n, c). The count follows that column's own maximum
+    radius and that channel's wavenumber. Phase moments for different counts
+    are read from their own ``CloudCoeff`` offset and truncated with their
+    own last coefficient.
     """
     n_ch = wavenumber.size
     sample = clouds[0].water
     n_prof, n_layer = sample.shape
     tau = np.zeros((n_prof, n_ch, n_layer), dtype=np.float64)
     bs = np.zeros_like(tau)
-    phase_acc = None
-    n_leg = 0
-    if scattering:
-        max_re = np.zeros(n_prof, dtype=np.float64)
-        for cloud in clouds:
-            wet = cloud.water > _WATER_CONTENT_THRESHOLD
-            max_re = np.maximum(max_re, np.max(np.where(wet, cloud.radius, 0.0), axis=1))
-        # One stream count per channel, from the largest particle in the chunk.
-        n_leg_ch = np.array(
-            [n_streams_for_radius(float(max_re.max()), float(wn)) if max_re.max() > 0 else 0 for wn in wavenumber]
-        )
-        n_leg = int(n_leg_ch.max()) if n_leg_ch.size else 0
-        if n_leg:
-            phase_acc = np.zeros((n_prof, n_ch, n_layer, n_leg + 1), dtype=np.float64)
+    n_leg = (
+        _legendre_counts(_column_max_radius(clouds), wavenumber)
+        if scattering
+        else np.zeros((n_prof, n_ch), dtype=np.int64)
+    )
+    orders = np.unique(n_leg)
+    orders = orders[orders > 0]
+    n_store = int(orders.max()) if orders.size else 0
+    phase_acc = np.zeros((n_prof, n_ch, n_layer, n_store + 1), dtype=np.float64) if n_store else None
+    floor = float(cloud_coeff.reff_ir[0])
     for cloud in clouds:
         wet = cloud.water > _WATER_CONTENT_THRESHOLD
         if not np.any(wet):
             continue
         pi, li = np.nonzero(wet)
-        radius = np.maximum(cloud.radius[pi, li], cloud_coeff.reff_ir[0])
+        radius = _replace_nonpositive_radius(cloud.radius[pi, li], floor)
         ke, w, phase = _cloud_fields_points(
-            cloud_coeff, wavenumber, radius, cloud.cloud_type, n_leg if scattering else 0
+            cloud_coeff, wavenumber, radius, cloud.cloud_type, int(orders[0]) if orders.size else 0
         )
         column = cloud.water[pi, li]
-        tau[pi, :, li] += (ke * column).T
-        if phase is not None:
-            scatter = (ke * column) * w
-            bs[pi, :, li] += scatter.T
-            phase_acc[pi, :, li, 1:] += np.moveaxis(phase[..., 1:] * scatter[..., None], 0, 1)
+        extinction = ke * column
+        absorption = extinction * (1.0 - w)
+        if phase is None:
+            tau[pi, :, li] += absorption.T
+            continue
+        # A column with no positive radius stays on the absorption path even
+        # when another column in the chunk has a stream expansion.
+        absorb = np.all(n_leg[pi] == 0, axis=1)
+        tau[pi, :, li] += np.where(absorb[None, :], absorption, extinction).T
+        scatter = np.where(absorb[None, :], 0.0, extinction * w)
+        bs[pi, :, li] += scatter.T
+
+        def _add_phase(phase_l, order):
+            use = n_leg[pi] == order
+            contrib = np.moveaxis(phase_l[..., 1:] * scatter[..., None], 0, 1)
+            phase_acc[pi, :, li, 1 : order + 1] += contrib * use[..., None]
+
+        _add_phase(phase, int(orders[0]))
+        for order in orders[1:]:
+            _ke, _w, phase_l = _cloud_fields_points(
+                cloud_coeff, wavenumber, radius, cloud.cloud_type, int(order)
+            )
+            _add_phase(phase_l, int(order))
     ssa = np.zeros_like(tau)
     if phase_acc is not None:
-        use = (bs > 1.0e-10) & (tau > 0.0)
+        use = (bs > 1.0e-10) & (tau > 0.0) & (n_leg[:, :, None] > 0)
         albedo = np.divide(bs, tau, out=np.zeros_like(bs), where=use)
         phase_acc[..., 1:] = np.divide(
             phase_acc[..., 1:], bs[..., None], out=np.zeros_like(phase_acc[..., 1:]), where=use[..., None]
         )
         phase_acc[..., 0] = 0.5
-        delta = phase_acc[..., n_leg]
+        index = np.broadcast_to(n_leg[:, :, None], (n_prof, n_ch, n_layer))
+        delta = np.take_along_axis(phase_acc, index[..., None], axis=-1)[..., 0]
         factor = np.maximum(1.0 - delta * albedo, 1.0e-6)
         tau = np.where(use, factor * tau, tau)
         ssa = np.where(use, np.clip((1.0 - delta) * albedo / factor, 0.0, _MAX_ALBEDO), 0.0)
@@ -855,7 +918,7 @@ def forward_chunk(coeff, level_p, pressure, temperature, h2o, o3, clouds, zenith
     tau = gas
     ssa = np.zeros_like(tau)
     phase = None
-    n_leg = 0
+    n_leg = np.zeros((tau.shape[0], len(bands)), dtype=np.int64)
     if clouds and coeff.cloud is not None:
         cloud_tau, cloud_ssa, phase, n_leg = cloud_optics_batch(coeff.cloud, wn, clouds, scattering)
         if scattering and phase is not None:
@@ -865,7 +928,7 @@ def forward_chunk(coeff, level_p, pressure, temperature, h2o, o3, clouds, zenith
         else:
             tau = tau + cloud_tau
             phase = None
-            n_leg = 0
+            n_leg = np.zeros_like(n_leg)
     planck = _planck(coeff.spc, channel_ids, temperature)
     skin_t = _skin_temperature(surface)
     skin = _planck(coeff.spc, channel_ids, np.broadcast_to(skin_t[:, None], (skin_t.size, 1)))[..., 0]
@@ -889,45 +952,61 @@ def forward_chunk(coeff, level_p, pressure, temperature, h2o, o3, clouds, zenith
         tb_rad[clear] = _emission(tau[clear], planck[clear], skin[clear], emis[clear], cosmic, mu[clear])
     if phase is not None and np.any(~clear):
         idx = np.flatnonzero(~clear)
-        # Split by stream count. ABI infrared with the usual radii is one group.
-        max_re = _chunk_max_radius(clouds, idx)
-        groups: dict[int, list[int]] = {}
-        for local, prof in enumerate(idx):
-            count = n_streams_for_radius(float(max_re[local]), float(wn.min())) if max_re[local] > 0 else n_leg
-            groups.setdefault(int(count), []).append(prof)
-        for count, profs in groups.items():
-            sel = np.array(profs, dtype=np.int64)
-            matched = _angles_match_node(mu[sel], max((count + 2) // 2, 1))
-            ordinary = sel[~matched]
-            if ordinary.size:
-                tb_rad[ordinary] = _ada_cloudy(
-                    tau[ordinary],
-                    ssa[ordinary],
-                    phase[ordinary],
-                    planck[ordinary],
-                    skin[ordinary],
-                    emis[ordinary],
-                    cosmic,
-                    mu[ordinary],
-                    count,
-                )
-            if np.any(matched):
-                from crtm_py.ada import ada_radiance
+        # Equal Legendre patterns share one eigen batch. A column can still
+        # split by channel when the Mie parameter crosses a stream boundary.
+        patterns, inverse = np.unique(n_leg[idx], axis=0, return_inverse=True)
+        for group, pattern in enumerate(patterns):
+            sel = idx[inverse == group]
+            for order in np.unique(pattern):
+                order = int(order)
+                chans = np.flatnonzero(pattern == order)
+                if order <= 0:
+                    tb_rad[np.ix_(sel, chans)] = _emission(
+                        tau[sel][:, chans],
+                        planck[sel][:, chans],
+                        skin[sel][:, chans],
+                        emis[sel][:, chans],
+                        cosmic[chans],
+                        mu[sel],
+                    )
+                    continue
+                tau_s = tau[sel][:, chans]
+                ssa_s = ssa[sel][:, chans]
+                phase_s = phase[sel][:, chans, :, : order + 1]
+                planck_s = planck[sel][:, chans]
+                skin_s = skin[sel][:, chans]
+                emis_s = emis[sel][:, chans]
+                mu_s = mu[sel]
+                matched = _angles_match_node(mu_s, max((order + 2) // 2, 1))
+                ordinary = np.flatnonzero(~matched)
+                if ordinary.size:
+                    tb_rad[np.ix_(sel[ordinary], chans)] = _ada_cloudy(
+                        tau_s[ordinary],
+                        ssa_s[ordinary],
+                        phase_s[ordinary],
+                        planck_s[ordinary],
+                        skin_s[ordinary],
+                        emis_s[ordinary],
+                        cosmic[chans],
+                        mu_s[ordinary],
+                        order,
+                    )
+                if np.any(matched):
+                    from crtm_py.ada import ada_radiance
 
-                for prof in sel[matched]:
-                    for ic, band in enumerate(bands):
-                        streams = phase.shape[-1] - 1
-                        tb_rad[prof, ic] = ada_radiance(
-                            tau[prof, ic],
-                            ssa[prof, ic],
-                            phase[prof, ic].T,
-                            planck[prof, ic],
-                            skin[prof, ic],
-                            emis[prof, ic],
-                            cosmic[ic],
-                            mu[prof],
-                            streams=streams,
-                        )
+                    for prof in sel[matched]:
+                        for ic in chans:
+                            tb_rad[prof, ic] = ada_radiance(
+                                tau[prof, ic],
+                                ssa[prof, ic],
+                                phase[prof, ic, :, : order + 1].T,
+                                planck[prof, ic],
+                                skin[prof, ic],
+                                emis[prof, ic],
+                                cosmic[ic],
+                                mu[prof],
+                                streams=order,
+                            )
     return _temperature_batch(coeff.spc, channel_ids, tb_rad), tb_rad
 
 
@@ -936,14 +1015,6 @@ class _Cloud:
         self.cloud_type = cloud_type
         self.water = water
         self.radius = radius
-
-
-def _chunk_max_radius(clouds, idx):
-    max_re = np.zeros(idx.size, dtype=np.float64)
-    for cloud in clouds:
-        wet = cloud.water[idx] > _WATER_CONTENT_THRESHOLD
-        max_re = np.maximum(max_re, np.max(np.where(wet, cloud.radius[idx], 0.0), axis=1))
-    return max_re
 
 
 def _skin_temperature(surface):

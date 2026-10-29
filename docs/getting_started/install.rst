@@ -14,7 +14,7 @@
 
    crtm-py @ git+https://github.com/IncubatorShokuhou/crtm-py
 
-版本号是 0.1.0。仓库打上 ``v0.1.0`` 标签后可以把 URL 钉在 ``@v0.1.0``。导入名是 ``crtm_py``。文档：
+版本号是 0.1.1。仓库打上 ``v0.1.1`` 标签后可以把 URL 钉在 ``@v0.1.1``。导入名是 ``crtm_py``。文档：
 
 .. code-block:: bash
 
