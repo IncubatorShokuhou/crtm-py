@@ -7,7 +7,7 @@ from crtm_py.forward import ForwardModel
 from crtm_py.geometry import Geometry
 from crtm_py.surface import Surface
 
-from tests.test_crtm_reference import PROFILE, _atmosphere, _surface
+from test_crtm_reference import PROFILE, _atmosphere, _surface
 
 
 def _repeat(n, clouds):
