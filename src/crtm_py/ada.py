@@ -2,18 +2,19 @@
 
 Clear columns use one specular stream, the same branch CRTM takes when
 scattering is off (``n_Streams = 0``, ``n_Angles = 1``). Cloudy columns
-use the matrix-operator layer and the adding loop. ``ASYMTX`` assumes a
-symmetric matrix. The phase-function operator assembled here is not
-symmetric, and forcing it to be symmetric increased the window-channel
-error, so the eigenvalue step uses ``numpy.linalg.eig`` and keeps the
-real part. Quadrature is Gauss-Legendre mapped onto ``(0, 1)``, which is
-the double-Gauss rule CRTM uses for a hemisphere. The sensor zenith is
-an extra stream when it does not match a quadrature angle.
+use the matrix-operator layer and the adding loop. The phase-function
+matrix passed to the eigensolver is real and not symmetric. ``ASYMTX``
+is the DISORT/EISPACK solver for that case: real arithmetic, eigenvalues
+known to be real. Quadrature is the CRTM double-Gauss rule on ``(0, 1)``,
+smallest cosine first. The sensor zenith is an extra stream when it does
+not match a quadrature angle.
 """
 
 from __future__ import annotations
 
 import numpy as np
+
+from crtm_py.asymtx import asymtx
 
 _PHASE_FLOOR = 1.0e-7
 _DELTA_OD = 1.0e-8
@@ -34,11 +35,15 @@ def _legendre(mu: np.ndarray, n_terms: int) -> np.ndarray:
 
 
 def _double_gauss(n_streams: int):
+    """``DOUBLE_GAUSS_QUADRATURE``: N-point Gauss nodes mapped onto (0, 1).
+
+    Index 0 is the smallest cosine. The sensor zenith, when it is not one
+    of these nodes, is appended after them.
+    """
     nodes, weights = np.polynomial.legendre.leggauss(n_streams)
     mu = 0.5 * (nodes + 1.0)
     wt = 0.5 * weights
-    # CRTM/DISORT double-Gauss stores the largest cosine first.
-    order = np.argsort(mu)[::-1]
+    order = np.argsort(mu)
     return mu[order], wt[order]
 
 
@@ -125,11 +130,10 @@ def _amom(ssa, tau, mu, weights, pff, pbb, planck, n_streams):
     ppm = pp - pm
     ppp = pp + pm
     hh = ppm @ ppp
-    eigval, eigvec = np.linalg.eig(hh)
-    eigval = np.real(eigval)
-    eigvec = np.real(eigvec)
-    eigval = np.clip(eigval, 0.0, None)
-    gamma = np.sqrt(eigval)
+    eigval, eigvec, ier = asymtx(hh)
+    if ier != 0:
+        raise RuntimeError(f"ASYMTX did not converge (ier={ier})")
+    gamma = np.sqrt(np.where(eigval > 0.0, eigval, 0.0))
     eigvf = np.linalg.lstsq(ppm, eigvec * gamma, rcond=None)[0]
     gp = 0.5 * (eigvec + eigvf)
     gm = 0.5 * (eigvec - eigvf)

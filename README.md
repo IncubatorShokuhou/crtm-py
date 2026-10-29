@@ -10,7 +10,7 @@ crtm-py @ git+https://github.com/IncubatorShokuhou/crtm-py
 
 打上 `v0.1.0` 标签之后，把 URL 末尾改成 `@v0.1.0`。发到 PyPI 之后则是 `crtm-py>=0.1`。
 
-**English.** Pure-Python / NumPy port of the CRTM forward path UPP v4.1 uses for WRF-ARW ABI infrared brightness temperature. With SpcCoeff, ODPS TauCoeff, CloudCoeff, Nalli water emissivity and NPOESS land emissivity, ABI G16 channels 7–16 follow CRTM v2.4. On the CRTM 92-layer clear-sky profile the difference from gfortran `libcrtm` (REAL64) is at most 0.059 K. A liquid-cloud case stays within 0.14 K on channels 8–16; channel 7 is 0.80 K off. Without coefficient files the package still runs a synthetic grey gas.
+**English.** Pure-Python / NumPy port of the CRTM forward path UPP v4.1 uses for WRF-ARW ABI infrared brightness temperature. With SpcCoeff, ODPS TauCoeff, CloudCoeff, Nalli water emissivity and NPOESS land emissivity, ABI G16 channels 7–16 follow CRTM v2.4. On the CRTM 92-layer profile the clear-sky difference from gfortran `libcrtm` (REAL64) is at most 0.059 K. A liquid cloud at nadir stays within 0.045 K; channel 7 is 0.0004 K. Without coefficient files the package still runs a synthetic grey gas.
 
 ## 安装
 
@@ -61,26 +61,56 @@ print(result.optical_depth_model)
 
 | 通道 | 晴空 0° | 晴空 30° | 有云 0° |
 | ---: | ---: | ---: | ---: |
-| 7 | -0.001 | -0.001 | +0.800 |
+| 7 | -0.001 | -0.001 | -0.000 |
 | 8 | -0.012 | -0.014 | -0.012 |
 | 9 | -0.004 | -0.006 | -0.005 |
-| 10 | +0.014 | +0.013 | +0.010 |
-| 11 | +0.001 | +0.002 | +0.136 |
+| 10 | +0.014 | +0.013 | +0.009 |
+| 11 | +0.001 | +0.002 | +0.000 |
 | 12 | +0.059 | +0.055 | -0.045 |
-| 13 | +0.001 | +0.001 | -0.013 |
-| 14 | +0.001 | +0.001 | -0.018 |
-| 15 | +0.001 | +0.001 | -0.007 |
-| 16 | +0.003 | +0.003 | -0.002 |
+| 13 | +0.001 | +0.001 | -0.000 |
+| 14 | +0.001 | +0.001 | +0.000 |
+| 15 | +0.001 | +0.001 | +0.000 |
+| 16 | +0.003 | +0.003 | -0.003 |
 
-晴空最大差 0.059 K（通道 12），过了 0.1 K。有云时通道 8–16 最大差 0.136 K（通道 11），过了 0.5 K。通道 7 有云是 +0.80 K，没过。这个通道散射更强。ADA 里 `ASYMTX` 假设矩阵对称，这里组出来的相函数算子并不对称。把矩阵对称化之后窗口通道更差，所以本征步用的是不对称分解的实部，差留在通道 7。
+晴空最大差 0.059 K（通道 12）。液水云天顶角 0° 最大差也是通道 12，0.045 K。通道 7 有云是 -0.0004 K。
+
+另外三条：
+
+| 情形 | 最大 \|Python − Fortran\| | 落在哪 |
+| --- | ---: | --- |
+| 晴空陆地，NPOESS 类别 1，皮肤温度 290 K，天顶角 0° | 0.054 K | 通道 12 |
+| 同一条液水云，天顶角 60° | 0.122 K | 通道 12 |
+| 300–500 hPa 冰云 0.02 kg/m²、半径 20 µm，再加上上面的液水云 | 0.142 K | 通道 12 |
+
+通道 7 在这三条里都在 0.001 K 以内。超过 0.1 K 的只有通道 12 的斜路径和冰云。晴空天顶角 0° 时这个通道已经差 0.059 K，斜路径和上层冰云把同一截气体光学厚度的差放大了。
+
+送进 `ASYMTX` 的相函数矩阵本身不对称，和转置的差可以到 70 以上。`CRTM_Utility` 里 `ASYMTX` 的说明写的是：解一个事先知道本征值为实数的实不对称矩阵。它不是对称本征分解。以前说“CRTM 假设矩阵对称”是错的。
+
+和 Fortran 对不上的第一处是云光学插值。`Get_Cloud_Opt_IR` 用 `Find_Random_Index` 加 `LPoly`，四个节点上两段二次多项式混在一起。之前这里用了相邻两点的线性插值，消光、单次散射反照率、Legendre 系数和 delta 截断一起偏了，相函数矩阵从这里开始分叉。求积点的数值是对的，但 Fortran 把最小的余弦放在前面；`Normalize_Phase` 从第一个流开始归一化，顺序反了，归一化之后的 `Pff`/`Pbb` 就不是同一个矩阵。这两处改完，同一层的 `HH`、本征值和本征向量与 Fortran 的 `ASYMTX` 一致。本征步按 `ASYMTX` 的实数算法写，不再对复数本征值取实部。
+
+陆地发射率同样用这套四点二次插值。两点线性插值时，晴空陆地通道 7 差 0.13 K；改完之后是 0.001 K。
+
+编对拍用的 `libcrtm` 时，JCSDA `v2.4.0` 的 `CMakeLists.txt` 第 6 行从
+
+```text
+project( crtm LANGUAGES Fortran )
+```
+
+改成
+
+```text
+project( crtm VERSION 2.4.0 LANGUAGES Fortran )
+```
+
+只加了版本号，给 ecbuild 用。计算选项没动。
 
 没放系数时仍用合成灰体，`optical_depth_model` 还是 `synthetic_grey_gas+geometric_optics_cloud`。
 
 | 环节 | 有系数时 |
 | --- | --- |
 | 气体光学厚度 | ODPS 第 2 组，水汽线用 compact OPTRAN（`OSignificance = 1`） |
-| 云 | `CloudCoeff` 红外表，按波数和有效半径线性插值；散射打开时做 delta 截断和 ADA |
-| 海面 / 陆地发射率 | Nalli IRSSEM；NPOESS 陆地类别表。冰、雪仍是常数 |
+| 云 | `CloudCoeff` 红外表，波数和有效半径用四点二次插值；散射打开时做 delta 截断和 ADA |
+| 海面 / 陆地发射率 | Nalli IRSSEM（三线性）；NPOESS 陆地类别表（四点二次）。冰、雪仍是常数 |
 | Planck | SpcCoeff 的 `Planck_C1/C2`、`Band_C1/C2` |
 | 通道 7 白天太阳反射 | 没做 |
 | ODAS 整条气体路径 | 没做。ABI G16 的 TauCoeff 是 ODPS，水汽线那一项已经是 OPTRAN |
@@ -113,7 +143,7 @@ https://bin.ssec.wisc.edu/pub/s4/CRTM/file/crtm_coefficients_jedi_release_2.4.0.
 
 ## 还没做
 
-1. 通道 7 有云时的 ADA 本征步。和 Fortran 差 0.80 K。`ASYMTX` 假设矩阵对称，这里的相函数算子不对称；强行对称化之后窗口通道更差，所以保留 `numpy.linalg.eig` 的实部。
+1. 通道 12 在天顶角 60° 和上层冰云时的差，分别是 0.122 K 和 0.142 K。来自气体光学厚度在用户层上的剩余差，不是 ADA 本征步。
 2. 通道 7 的白天太阳反射。
 3. 冰、雪发射率系数。现在仍是常数。
 4. 单独的 ODAS 气体路径。ABI G16 的 TauCoeff 是 ODPS。

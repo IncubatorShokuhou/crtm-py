@@ -4,8 +4,8 @@ Water follows ``CRTM_Compute_IRSSEM``: trilinear interpolation in zenith
 angle (degrees), wavenumber and wind speed. ``CRTM_Init`` loads
 ``Nalli.IRwater.EmisCoeff.bin``; ``WuSmith.IRwater.EmisCoeff.bin`` is the
 alternate table and uses the same record layout. Land follows
-``SEcategory_Emissivity``: linear interpolation in wavenumber of
-``1 - reflectance`` for the CRTM land-type index
+``SEcategory_Emissivity``: the four-point quadratic in wavenumber used by
+``LPoly``, applied to ``1 - reflectance``
 (``NPOESS.IRland.EmisCoeff.bin``).
 """
 
@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from crtm_py.crtm_binary import FortranFile
+from crtm_py.lagrange import find_random_index, interp_1d, lagrange_weights
 
 
 def _weights(grid: np.ndarray, value: float):
@@ -130,8 +131,10 @@ def water_emissivity(coeff: IRWaterCoeff, wavenumber: float, zenith_deg: float, 
 
 
 def land_emissivity(coeff: IRLandCoeff, wavenumber: float, land_type: int) -> float:
+    """``SEcategory_Emissivity``: ``1 - reflectance``, quadratic in wavenumber."""
     n_type = coeff.reflectance.shape[1]
     itype = int(np.clip(land_type, 1, n_type)) - 1
-    i1, i2, w1, w2 = _weights(coeff.frequency, wavenumber)
-    reflectance = w1 * coeff.reflectance[i1, itype] + w2 * coeff.reflectance[i2, itype]
+    i1, freq = find_random_index(coeff.frequency, wavenumber)
+    weights = lagrange_weights(coeff.frequency[i1 : i1 + 4], freq)
+    reflectance = interp_1d(coeff.reflectance[i1 : i1 + 4, itype], weights)
     return float(np.clip(1.0 - reflectance, 0.0, 1.0))

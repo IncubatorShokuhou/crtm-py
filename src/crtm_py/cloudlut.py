@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from crtm_py.crtm_binary import FortranFile
+from crtm_py.lagrange import find_random_index, interp_2d, lagrange_weights
 
 _WATER_CONTENT_THRESHOLD = 1.0e-6
 _DENSITY_INDEX = {
@@ -60,28 +61,6 @@ def load_cloudcoeff(path) -> CloudCoeff:
     return CloudCoeff(frequency_ir=frequency, reff_ir=reff, ke_ir=ke, w_ir=w, pcoeff_ir=pcoeff)
 
 
-def _bracket(grid: np.ndarray, value: float):
-    x = float(np.clip(value, grid[0], grid[-1]))
-    if x <= grid[0]:
-        return 0, 0, 1.0, 0.0
-    if x >= grid[-1]:
-        return grid.size - 1, grid.size - 1, 1.0, 0.0
-    i2 = int(np.searchsorted(grid, x, side="right"))
-    i1 = i2 - 1
-    span = grid[i2] - grid[i1]
-    w2 = (x - grid[i1]) / span
-    return i1, i2, 1.0 - w2, w2
-
-
-def _interp2(table, i1, i2, wi1, wi2, j1, j2, wj1, wj2):
-    return (
-        wi1 * wj1 * table[i1, j1]
-        + wi2 * wj1 * table[i2, j1]
-        + wi1 * wj2 * table[i1, j2]
-        + wi2 * wj2 * table[i2, j2]
-    )
-
-
 def cloud_bulk(coeff: CloudCoeff, wavenumber, cloud_type: str, radius_um: float, *, scattering: bool, n_legendre: int):
     """Return ``ke``, single-scatter albedo and phase coefficients.
 
@@ -92,10 +71,12 @@ def cloud_bulk(coeff: CloudCoeff, wavenumber, cloud_type: str, radius_um: float,
     if cloud_type not in _DENSITY_INDEX:
         raise KeyError(cloud_type)
     k = _DENSITY_INDEX[cloud_type]
-    i1, i2, wi1, wi2 = _bracket(coeff.frequency_ir, wavenumber)
-    j1, j2, wj1, wj2 = _bracket(coeff.reff_ir, radius_um)
-    ke = float(_interp2(coeff.ke_ir[:, :, k], i1, i2, wi1, wi2, j1, j2, wj1, wj2))
-    w = float(_interp2(coeff.w_ir[:, :, k], i1, i2, wi1, wi2, j1, j2, wj1, wj2))
+    i1, freq = find_random_index(coeff.frequency_ir, wavenumber)
+    j1, radius = find_random_index(coeff.reff_ir, radius_um)
+    freq_w = lagrange_weights(coeff.frequency_ir[i1 : i1 + 4], freq)
+    radius_w = lagrange_weights(coeff.reff_ir[j1 : j1 + 4], radius)
+    ke = interp_2d(coeff.ke_ir[i1 : i1 + 4, j1 : j1 + 4, k], freq_w, radius_w)
+    w = interp_2d(coeff.w_ir[i1 : i1 + 4, j1 : j1 + 4, k], freq_w, radius_w)
     if ke < 0.0:
         ke = 0.0
     w = float(np.clip(w, 0.0, 1.0))
@@ -105,8 +86,8 @@ def cloud_bulk(coeff: CloudCoeff, wavenumber, cloud_type: str, radius_um: float,
     phase = np.zeros(n_legendre + 1, dtype=np.float64)
     phase[0] = 0.5
     for ell in range(1, n_legendre + 1):
-        phase[ell] = float(
-            _interp2(coeff.pcoeff_ir[:, :, k, ell + offset], i1, i2, wi1, wi2, j1, j2, wj1, wj2)
+        phase[ell] = interp_2d(
+            coeff.pcoeff_ir[i1 : i1 + 4, j1 : j1 + 4, k, ell + offset], freq_w, radius_w
         )
     return ke, w, phase
 

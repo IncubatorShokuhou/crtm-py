@@ -4,8 +4,11 @@ The profile is the 92-layer clear-sky atmosphere in
 ``test/mains/regression/forward/test_ClearSky/Load_Atm_Data.inc``.
 The reference temperatures were produced by ``libcrtm.so`` from that tag,
 Nalli water emissivity, wind 5 m/s, water temperature 290 K, source zenith
-180 deg. The cloudy case puts 0.05 kg m^-2 of liquid water with a 10 µm
-effective radius in every layer between 700 and 900 hPa and turns scattering on.
+180 deg. The liquid-cloud case puts 0.05 kg m^-2 of water with a 10 µm
+effective radius in every layer between 700 and 900 hPa and turns scattering
+on. The extra cases are clear land (NPOESS type 1, 290 K), the same liquid
+cloud at 60 deg zenith, and that liquid cloud plus 0.02 kg m^-2 of ice
+(20 µm) between 300 and 500 hPa.
 
 Skip the test when ``CRTM_PY_COEFF_DIR`` does not contain the coefficient files.
 Those files are not stored in git.
@@ -37,6 +40,15 @@ CLEAR_ZENITH_30 = np.array(
 )
 CLOUDY_ZENITH_0 = np.array(
     [251.81339, 237.30243, 241.49865, 246.55066, 253.34341, 244.92213, 254.33604, 254.52173, 254.26198, 249.84884]
+)
+LAND_CLEAR = np.array(
+    [284.61940120, 237.32494695, 241.87111532, 250.34213885, 283.01699213, 260.08914847, 285.26307077, 285.43228237, 283.59072654, 268.24551100]
+)
+CLOUDY_ZENITH_60 = np.array(
+    [249.50681129, 235.32846233, 238.78230656, 243.76063638, 251.13283743, 242.35516320, 253.07804732, 253.76082542, 253.49194623, 247.62266598]
+)
+ICE_AND_WATER = np.array(
+    [226.43230312, 228.38106583, 226.88416340, 226.77563880, 223.34768966, 234.12604758, 224.63820523, 224.28135026, 223.74966846, 226.52586201]
 )
 
 
@@ -126,16 +138,56 @@ def test_include_clouds_false_ignores_the_liquid_layer(coeff_dir):
     np.testing.assert_allclose(np.asarray(result.brightness_temperature).reshape(-1), clear, atol=1e-6)
 
 
-def test_water_cloud_ada_against_fortran_crtm(coeff_dir):
+def _liquid():
     pressure = PROFILE["pressure_hpa"]
     water = np.where((pressure >= 700.0) & (pressure <= 900.0), 0.05, 0.0)
-    cloud = Cloud("water", water.reshape(1, -1), np.full((1, pressure.size), 10.0))
-    tb, _ = _tb(coeff_dir, 0.0, (cloud,), True)
-    delta = tb - CLOUDY_ZENITH_0
-    # Channel 7 (index 0) is the shortwave IR channel. The ADA eigenstep
-    # does not reproduce CRTM ASYMTX there; the other nine channels do.
-    assert abs(delta[0]) < 1.0
-    assert np.max(np.abs(delta[1:])) < 0.2
+    return (Cloud("water", water.reshape(1, -1), np.full((1, pressure.size), 10.0)),)
+
+
+def _land():
+    surface = _surface()
+    surface.water_coverage[:] = 0.0
+    surface.land_coverage[:] = 1.0
+    surface.land_type[:] = 1
+    surface.land_temperature[:] = 290.0
+    return surface
+
+
+def test_water_cloud_ada_against_fortran_crtm(coeff_dir):
+    tb, _ = _tb(coeff_dir, 0.0, _liquid(), True)
+    assert np.max(np.abs(tb - CLOUDY_ZENITH_0)) < 0.1
+
+
+def test_land_clear_sky_matches_fortran_crtm(coeff_dir):
+    model = ForwardModel("abi_g16", coeff_path=coeff_dir)
+    result = model.run(
+        _atmosphere(),
+        _land(),
+        Geometry(np.array([0.0]), np.array([180.0]), np.array([0.0])),
+        include_scattering=False,
+    )
+    tb = np.asarray(result.brightness_temperature).reshape(-1)
+    assert np.max(np.abs(tb - LAND_CLEAR)) < 0.1
+
+
+def test_water_cloud_at_60_degrees_matches_fortran_crtm(coeff_dir):
+    tb, _ = _tb(coeff_dir, 60.0, _liquid(), True)
+    delta = tb - CLOUDY_ZENITH_60
+    # Channel 12 carries the clear-sky ozone residual; the slant path makes it larger.
+    assert abs(delta[0]) < 0.01
+    assert abs(delta[5]) < 0.15
+    assert np.max(np.abs(np.delete(delta, 5))) < 0.05
+
+
+def test_ice_and_water_clouds_match_fortran_crtm(coeff_dir):
+    pressure = PROFILE["pressure_hpa"]
+    ice = np.where((pressure >= 300.0) & (pressure <= 500.0), 0.02, 0.0)
+    clouds = _liquid() + (Cloud("ice", ice.reshape(1, -1), np.full((1, pressure.size), 20.0)),)
+    tb, _ = _tb(coeff_dir, 0.0, clouds, True)
+    delta = tb - ICE_AND_WATER
+    assert abs(delta[0]) < 0.01
+    assert abs(delta[5]) < 0.2
+    assert np.max(np.abs(np.delete(delta, 5))) < 0.05
 
 
 def test_big_endian_npoess_land_matches_little_endian(coeff_dir):

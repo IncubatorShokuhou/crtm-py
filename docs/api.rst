@@ -48,6 +48,12 @@ API
 .. automodule:: crtm_py.ada
    :members:
 
+.. automodule:: crtm_py.asymtx
+   :members:
+
+.. automodule:: crtm_py.lagrange
+   :members:
+
 .. automodule:: crtm_py.emis
    :members:
 
