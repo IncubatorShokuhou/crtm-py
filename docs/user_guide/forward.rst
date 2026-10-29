@@ -24,7 +24,7 @@
    print(result.brightness_temperature)
    print(result.optical_depth_model)
 
-``result.brightness_temperature`` 单位是 K，顺序跟 ``channels`` 一致。``optical_depth_model`` 在这一版固定是 ``synthetic_grey_gas+geometric_optics_cloud``。
+``result.brightness_temperature`` 单位是 K，顺序跟 ``channels`` 一致。没放系数时 ``optical_depth_model`` 是 ``synthetic_grey_gas+geometric_optics_cloud``。放了 SpcCoeff 和 ODPS TauCoeff 之后，缺省是 ``odps+specular_emission``；``include_scattering=True`` 时是 ``odps+cloudcoeff+ada``。
 
 数组
 ----
@@ -59,4 +59,8 @@
 
 臭氧省略时按 WRF 分支处理，吸收物记 1e-10 ppmv。传入的臭氧是 kg/kg，内部乘 604229 换成 ppmv。
 
-发射求解把每一层当成等温层，天顶方向的光学厚度乘 ``1/cos(zenith)``，地表向下的热辐射用漫射度割线 5/3。没有散射，也没有通道 7 的太阳反射。
+没放系数时，每一层按等温层算，天顶方向的光学厚度乘 ``1/cos(zenith)``，地表向下的热辐射用漫射度割线 5/3。没有散射。
+
+放了系数之后，缺省仍是无散射的镜面发射。``include_scattering=True`` 改用 ADA，云的消光、单次散射反照率和 Legendre 系数来自 ``CloudCoeff``。海面发射率读 Nalli（没有这份文件时用 Wu-Smith），陆地读 NPOESS。冰、雪仍是常数。通道 7 的白天太阳反射两条路径都没有。
+
+``include_clouds=False`` 时两种路径都不加云。

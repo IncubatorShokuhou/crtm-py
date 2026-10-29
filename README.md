@@ -10,7 +10,7 @@ crtm-py @ git+https://github.com/IncubatorShokuhou/crtm-py
 
 打上 `v0.1.0` 标签之后，把 URL 末尾改成 `@v0.1.0`。发到 PyPI 之后则是 `crtm-py>=0.1`。
 
-**English.** Pure-Python / NumPy port of the CRTM forward pieces UPP v4.1 uses for WRF-ARW ABI infrared brightness temperature. Profile conversion, effective radius and geostationary zenith follow `CALRAD_WCLOUD_newcrtm.f`. Gas optical depth and cloud optical properties do not yet use official CRTM coefficients, so the temperatures are not CRTM output.
+**English.** Pure-Python / NumPy port of the CRTM forward path UPP v4.1 uses for WRF-ARW ABI infrared brightness temperature. With SpcCoeff, ODPS TauCoeff, CloudCoeff, Nalli water emissivity and NPOESS land emissivity, ABI G16 channels 7–16 follow CRTM v2.4. On the CRTM 92-layer clear-sky profile the difference from gfortran `libcrtm` (REAL64) is at most 0.059 K. A liquid-cloud case stays within 0.14 K on channels 8–16; channel 7 is 0.80 K off. Without coefficient files the package still runs a synthetic grey gas.
 
 ## 安装
 
@@ -53,23 +53,37 @@ print(result.optical_depth_model)
 
 水成物用 `Hydrometeors`，混合比单位 kg/kg，微物理方案号用 WRF 的 `mp_physics`。Thompson (8)、WSM6 (6)、Lin (2)、GFDL (11) 走 `EFFR`；Ferrier (5/85/95) 和 Zhao (98/99) 走 `CALRAD` 里内联的半径，不走 `EFFR`。
 
-## 这一版算出来的亮温
+## 和 CRTM v2.4.0 的差别
 
-| 环节 | 状态 |
+系数放进 `CRTM_PY_COEFF_DIR` 之后，`abi_g16` 走 ODPS，不再走合成灰体。对拍用的是 JCSDA `v2.4.0` 用 gfortran、`REAL64` 编出来的 `libcrtm.so`。廓线是 CRTM 自带晴空测试的 92 层（`test_ClearSky/Load_Atm_Data.inc` 第一条）。海面是 Nalli，风速 5 m/s，水温 290 K，太阳天顶角 180°。
+
+下表是 Python 减 Fortran，单位 K。有云个例在 700–900 hPa 放液水 0.05 kg/m²，有效半径 10 µm，散射打开。
+
+| 通道 | 晴空 0° | 晴空 30° | 有云 0° |
+| ---: | ---: | ---: | ---: |
+| 7 | -0.001 | -0.001 | +0.800 |
+| 8 | -0.012 | -0.014 | -0.012 |
+| 9 | -0.004 | -0.006 | -0.005 |
+| 10 | +0.014 | +0.013 | +0.010 |
+| 11 | +0.001 | +0.002 | +0.136 |
+| 12 | +0.059 | +0.055 | -0.045 |
+| 13 | +0.001 | +0.001 | -0.013 |
+| 14 | +0.001 | +0.001 | -0.018 |
+| 15 | +0.001 | +0.001 | -0.007 |
+| 16 | +0.003 | +0.003 | -0.002 |
+
+晴空最大差 0.059 K（通道 12），过了 0.1 K。有云时通道 8–16 最大差 0.136 K（通道 11），过了 0.5 K。通道 7 有云是 +0.80 K，没过。这个通道散射更强。ADA 里 `ASYMTX` 假设矩阵对称，这里组出来的相函数算子并不对称。把矩阵对称化之后窗口通道更差，所以本征步用的是不对称分解的实部，差留在通道 7。
+
+没放系数时仍用合成灰体，`optical_depth_model` 还是 `synthetic_grey_gas+geometric_optics_cloud`。
+
+| 环节 | 有系数时 |
 | --- | --- |
-| 吸收物单位：水汽 g/kg 混合比，臭氧 ppmv，缺测臭氧记 1e-10 | 按 `CALRAD` |
-| 水成物柱含量 `q * dp / g`，对流云 `icu_physics=2` | 按 `CALRAD` |
-| `EFFR`（含 WSM6 冰半径顶在 250 µm、Thompson 霰用 `RG=g` 这两处源程序行为） | 按 `CALRAD` |
-| 植被类型表、地表覆盖、皮肤温度 | 按 `CALRAD` |
-| 静止卫星天顶角 | 按 `GEO_ZENITH_ANGLE.f` |
-| Planck 函数，波数用 ABI 波段中心 | 公式按 CRTM；不是 SpcCoeff 通道积分 |
-| 等温层、平面平行、朗伯漫射度 5/3 的发射求解 | 无散射极限 |
-| 气体光学厚度 | **合成灰体**，不是 ODPS / ODAS |
-| 云消光 | **几何光学** `3 Qext / (4 ρ re)`，`Qext=2`，单次散射反照率为 0。不是 CloudCoeff |
-| 地表发射率 | 水面 0.98、陆地 0.97、冰 0.98、雪 0.99，按覆盖加权。不是 IRSSE / IRwater |
-| ABI 通道 7 的太阳反射 | 没有 |
-
-所以 10 个红外通道都能返回亮温，数值**不能**和 `unipost.exe` 或 pyCRTM 对表。结果对象的 `optical_depth_model` 是 `synthetic_grey_gas+geometric_optics_cloud`，`notes` 里写了同样的限制。
+| 气体光学厚度 | ODPS 第 2 组，水汽线用 compact OPTRAN（`OSignificance = 1`） |
+| 云 | `CloudCoeff` 红外表，按波数和有效半径线性插值；散射打开时做 delta 截断和 ADA |
+| 海面 / 陆地发射率 | Nalli IRSSEM；NPOESS 陆地类别表。冰、雪仍是常数 |
+| Planck | SpcCoeff 的 `Planck_C1/C2`、`Band_C1/C2` |
+| 通道 7 白天太阳反射 | 没做 |
+| ODAS 整条气体路径 | 没做。ABI G16 的 TauCoeff 是 ODPS，水汽线那一项已经是 OPTRAN |
 
 ## 系数
 
@@ -87,19 +101,28 @@ crtm-py fetch --local-tarball /path/to/fix_REL-2.4.0.tgz
 crtm-py fetch --yes          # 会下载约 3.4 GB，没有 --yes 会拒绝
 ```
 
-解包只留 little-endian 的 ABI `SpcCoeff` / `TauCoeff`、`CloudCoeff.bin`、`AerosolCoeff.bin` 和名字里带 `Emis` 的文件，写到 `~/.cache/crtm-py/coefficients`。这一版**不读**这些文件。目录也可以用 `set_coeff_path` 或环境变量 `CRTM_PY_COEFF_DIR`（也认 `CRTM_COEFF_DIR`、`FIXCRTM`）指过去，前向结果的 `notes` 会记一笔“路径已设置，读取尚未实现”。
+解包只留 little-endian 的 ABI `SpcCoeff` / `TauCoeff`、`CloudCoeff.bin`、`AerosolCoeff.bin` 和名字里带 `Emis` 的文件，写到 `~/.cache/crtm-py/coefficients`。目录里同时有该传感器的 `SpcCoeff.bin` 和 ODPS `TauCoeff.bin` 时，前向模式会读它们。也可以用 `set_coeff_path` 或环境变量 `CRTM_PY_COEFF_DIR`（也认 `CRTM_COEFF_DIR`、`FIXCRTM`）。
+
+对拍用的是 JEDI 2.4.0 系数包，大约 770 MB。文件名带 `.tar.gz`，内容是 POSIX tar，不是 gzip：
+
+```text
+https://bin.ssec.wisc.edu/pub/s4/CRTM/file/crtm_coefficients_jedi_release_2.4.0.tar.gz
+```
+
+`crtm-py fetch --list` 里的键是 `2.4.0-jedi`。
 
 ## 还没做
 
-1. ODPS 预报量光学厚度（`TauCoeff`），以及旧的 ODAS。
-2. `CloudCoeff` 查表：消光、单次散射反照率、不对称因子，随有效半径和波段变化。
-3. 带散射的 ADA / SOI。最大随机云重叠（CRTM 2.4 的 cloud fraction）只预留了数组，光学厚度目前按层分数相乘。
-4. IRSSE 陆地发射率和红外水面 Fresnel。通道 7 的太阳反射需要 `SpcCoeff` 里的太阳辐照度。
-5. SpcCoeff 的 NetCDF / Fortran 二进制读取，以及多色 Planck 系数。
-6. 气溶胶、微波仪器。
-7. 和 `unipost.exe` 或 pyCRTM 的同廓线对比。等 1–3 落地再做。
+1. 通道 7 有云时的 ADA 本征步。和 Fortran 差 0.80 K。`ASYMTX` 假设矩阵对称，这里的相函数算子不对称；强行对称化之后窗口通道更差，所以保留 `numpy.linalg.eig` 的实部。
+2. 通道 7 的白天太阳反射。
+3. 冰、雪发射率系数。现在仍是常数。
+4. 单独的 ODAS 气体路径。ABI G16 的 TauCoeff 是 ODPS。
+5. 最大随机云重叠。`cloud_fraction` 在 CRTM 里还会把过小的云水清零，这里没有做这步。
+6. 气溶胶、微波仪器。第 1 组微量气体预报量会直接报错。
+7. NetCDF 系数。Fortran 顺序无格式文件的大端和小端都能读。
+8. 和 `upp-py` 接线。这一版不改那个仓库。
 
-纯 Python 重写仍然是目标。若 ODPS 移植长期对不上 CRTM，再考虑可选的 Fortran 后端（pyCRTM 或对 JCSDA CRTM 的薄封装）作为额外入口，不替换现在的数组接口。这一版没有链接 Fortran。
+CI 下载 JEDI 系数，用 `tests/test_crtm_reference.py` 里记下的 Fortran 亮温回归。不在 CI 里重编 `libcrtm`：本机已经用 JCSDA `v2.4.0`、gfortran、`REAL64` 跑过同一条廓线，数字写在测试里。ecbuild 要求 `project()` 带版本号，上游 `CMakeLists.txt` 要改一行才能编过。
 
 ## 文档
 

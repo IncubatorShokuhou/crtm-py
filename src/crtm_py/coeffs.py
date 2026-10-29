@@ -1,9 +1,10 @@
 """Locate or unpack official CRTM coefficient tarballs.
 
-The binaries are NOAA / JCSDA data. They are not part of this repository
-and this module does not parse ``SpcCoeff`` or ``TauCoeff`` yet. Fetching
-puts the little-endian ABI files, ``CloudCoeff.bin`` and emissivity files
-into a cache directory so a later reader has a stable path.
+The binaries are NOAA / JCSDA data and are not part of this repository.
+This module only selects and unpacks files. SpcCoeff, ODPS TauCoeff,
+CloudCoeff and the infrared emissivity tables are read by
+``crtm_py.spc``, ``crtm_py.odps``, ``crtm_py.cloudlut`` and ``crtm_py.emis``
+once :func:`crtm_py.forward.ForwardModel` finds them.
 
 Default tarball (CRTM REL-2.4.0 fix, about 3.4 GB)::
 
@@ -28,6 +29,7 @@ from pathlib import Path
 from urllib.request import urlretrieve
 
 RELEASES = {
+    "2.4.0-jedi": "https://bin.ssec.wisc.edu/pub/s4/CRTM/file/crtm_coefficients_jedi_release_2.4.0.tar.gz",
     "2.4.0": "https://bin.ssec.wisc.edu/pub/s4/CRTM/fix_REL-2.4.0.tgz",
     "2.4.0-emc": "https://bin.ssec.wisc.edu/pub/s4/CRTM/fix_REL-2.4.0_emc.tgz",
     "2.3.0-emc": "https://bin.ssec.wisc.edu/pub/s4/CRTM/fix_REL-2.3.0_emc.tgz",

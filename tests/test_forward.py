@@ -118,6 +118,23 @@ def test_thick_cloud_pulls_the_window_toward_the_cloud_temperature():
     assert cloudy.brightness_temperature[0] < 275.0
 
 
+def test_scattering_flag_without_coefficients_stays_synthetic():
+    p_int, p_mid, t, q = _column()
+    result = brightness_temperature(
+        p_int,
+        p_mid,
+        t,
+        q,
+        sensor="abi_g16",
+        channels=(14,),
+        sensor_zenith=0.0,
+        skin_temperature=292.0,
+        include_scattering=True,
+    )
+    assert "synthetic_grey_gas" in result.optical_depth_model
+    assert any("include_scattering" in note for note in result.notes)
+
+
 def test_zenith_above_the_upp_limit_is_missing():
     p_int, p_mid, t, q = _column()
     result = brightness_temperature(

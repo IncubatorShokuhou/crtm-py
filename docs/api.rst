@@ -35,3 +35,21 @@ API
 
 .. automodule:: crtm_py.optics
    :members:
+
+.. automodule:: crtm_py.odps
+   :members:
+
+.. automodule:: crtm_py.spc
+   :members:
+
+.. automodule:: crtm_py.cloudlut
+   :members:
+
+.. automodule:: crtm_py.ada
+   :members:
+
+.. automodule:: crtm_py.emis
+   :members:
+
+.. automodule:: crtm_py.crtm_solver
+   :members:

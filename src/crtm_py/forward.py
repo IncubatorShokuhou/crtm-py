@@ -1,9 +1,14 @@
 """Forward brightness temperature for the ABI channels UPP posts.
 
 The public entry point is :func:`brightness_temperature`. It builds the
-UPP atmosphere and surface, the geostationary zenith, the synthetic
-optical depth and the emission solution, then converts radiance to
-brightness temperature.
+UPP atmosphere and surface and the geostationary zenith, then integrates.
+
+When the coefficient directory contains ``SpcCoeff`` and an ODPS
+``TauCoeff`` for the sensor, gas optical depth is ODPS, cloud optics come
+from ``CloudCoeff``, and sea / land emissivity come from Nalli and NPOESS.
+``include_scattering=False`` keeps the specular emission solution.
+``include_scattering=True`` runs ADA. Without those files the call falls
+back to the synthetic grey gas and geometric-optics extinction.
 
 Profiles UPP would skip (sensor zenith outside ``[0, 80]``, or a
 non-finite temperature or pressure) are returned as NaN. UPP writes its
@@ -13,13 +18,15 @@ non-finite temperature or pressure) are returned as NaN. UPP writes its
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from crtm_py._batch import normalize_horizontal
 from crtm_py.atmosphere import Atmosphere, atmosphere_from_upp
 from crtm_py.clouds import Hydrometeors
+from crtm_py.coeffs import coeff_path as configured_coeff_path
+from crtm_py.crtm_solver import brightness_crtm, load_sensor
 from crtm_py.emission import emission_radiance, radiance_to_brightness_temperature
 from crtm_py.geometry import Geometry, geostationary_zenith
 from crtm_py.optics import OPTICAL_DEPTH_MODEL, total_optical_depth
@@ -65,7 +72,8 @@ class ForwardResult:
     wavenumber_cm : ndarray
         Central wavenumber for each returned channel.
     optical_depth_model : str
-        Identifier of the optical-depth recipe. The v0.1 value is
+        ``odps+specular_emission`` or ``odps+cloudcoeff+ada`` when
+        official coefficients loaded. Otherwise
         ``synthetic_grey_gas+geometric_optics_cloud``.
     valid : ndarray
         Boolean mask of profiles that were integrated, in batch layout
@@ -94,12 +102,11 @@ class ForwardModel:
     channels : sequence of int, optional
         ABI band numbers. The default is 7 through 16.
     coeff_path : path-like, optional
-        Directory of official CRTM coefficient files. The files are not
-        read yet. When the directory exists the result notes say so and
-        the synthetic optical depth is still used.
+        Directory of official CRTM coefficient files. When it contains
+        this sensor's ``SpcCoeff.bin`` and ODPS ``TauCoeff.bin`` those
+        files are read. A missing pair keeps the synthetic optical depth.
     include_clouds : bool
-        Add geometric-optics cloud optical depth. Gas optical depth is
-        always included.
+        Add cloud optical depth. Gas optical depth is always included.
     """
 
     def __init__(self, sensor: str, channels=None, coeff_path=None, include_clouds: bool = True):
@@ -117,17 +124,15 @@ class ForwardModel:
         include_scattering: bool = False,
     ) -> ForwardResult:
         """Integrate one batch. Arrays on the three arguments are top-down."""
-        if include_scattering:
-            raise NotImplementedError(
-                "CRTM ADA/SOI scattering is not implemented; the emission solver "
-                "treats optical depth as pure absorption"
-            )
         if atmosphere.n_profiles != surface.n_profiles:
             raise ValueError(
                 f"atmosphere has {atmosphere.n_profiles} profiles and surface has {surface.n_profiles}"
             )
         if geometry.sensor_zenith_angle.shape != (atmosphere.n_profiles,):
             raise ValueError("sensor zenith must have one angle per profile")
+        loaded = _loaded_coefficients(self.sensor.sensor_id, self.coeff_path)
+        if loaded is not None:
+            return _run_crtm(self, atmosphere, surface, geometry, loaded, include_scattering)
         _warn_once()
         wn = np.array([self.sensor.channels[c] for c in self.channels], dtype=np.float64)
         valid = geometry.valid_zenith & np.isfinite(atmosphere.temperature).all(axis=1)
@@ -150,9 +155,11 @@ class ForwardModel:
         notes = [_SYNTHETIC_WARNING]
         if self.coeff_path is not None:
             notes.append(
-                f"coefficient path {self.coeff_path} is recorded; "
-                "ODPS, CloudCoeff and SpcCoeff readers are not implemented"
+                f"coefficient path {self.coeff_path} did not yield SpcCoeff and ODPS TauCoeff; "
+                "the synthetic optical depth is still used"
             )
+        if include_scattering:
+            notes.append("include_scattering has no effect without SpcCoeff and ODPS TauCoeff")
         notes.append("ABI channel 7 has no reflected solar term")
         notes.append("surface emissivity is a coverage-weighted constant, not IRSSE or IRwater")
         layout = atmosphere.layout
@@ -171,6 +178,64 @@ class ForwardModel:
             valid=valid,
             notes=tuple(notes),
         )
+
+
+def _loaded_coefficients(sensor_id: str, explicit):
+    root = explicit if explicit is not None else configured_coeff_path()
+    if root is None:
+        return None
+    try:
+        return load_sensor(sensor_id, root)
+    except (OSError, ValueError):
+        return None
+
+
+def _run_crtm(model, atmosphere, surface, geometry, loaded, include_scattering: bool):
+    if not model.include_clouds:
+        atmosphere = replace(atmosphere, clouds=())
+    valid = geometry.valid_zenith & np.isfinite(atmosphere.temperature).all(axis=1)
+    valid = valid & np.isfinite(atmosphere.pressure_hpa).all(axis=1)
+    zenith = geometry.sensor_zenith_angle.copy()
+    zenith = np.where(valid, zenith, 0.0)
+    safe_geometry = type(geometry)(zenith, geometry.solar_zenith_angle, geometry.sensor_scan_angle)
+    tb, rad = brightness_crtm(
+        loaded,
+        atmosphere,
+        surface,
+        safe_geometry,
+        model.channels,
+        scattering=include_scattering,
+    )
+    tb = np.where(valid[:, None], tb, np.nan)
+    rad = np.where(valid[:, None], rad, np.nan)
+    wn = np.array([loaded.spc.wavenumber[loaded.spc.channel_index(c)] for c in model.channels])
+    notes = [
+        "gas optical depth is ODPS (group "
+        f"{loaded.odps.group}), including compact OPTRAN where OSignificance is 1",
+        "cloud optics use CloudCoeff IR mass extinction, albedo and Legendre terms"
+        if loaded.cloud is not None
+        else "CloudCoeff.bin was not found; clouds are omitted",
+        "sea emissivity is Nalli IRSSEM (Wu-Smith if that is the file present); land emissivity is NPOESS"
+        if loaded.water is not None and loaded.land is not None
+        else "Wu-Smith or NPOESS coefficients were not both found",
+        "ice and snow emissivity are still the constant infrared values",
+        "daytime solar reflection on ABI channel 7 is not applied",
+        "ADA is used when scattering is requested; otherwise the specular emission branch is used",
+    ]
+    layout = atmosphere.layout
+    if layout is not None:
+        tb = layout.restore(tb)
+        rad = layout.restore(rad)
+    return ForwardResult(
+        brightness_temperature=tb,
+        radiance=rad,
+        channels=model.channels,
+        sensor_id=model.sensor.sensor_id,
+        wavenumber_cm=wn,
+        optical_depth_model="odps+cloudcoeff+ada" if include_scattering else "odps+specular_emission",
+        valid=valid,
+        notes=tuple(notes),
+    )
 
 
 def surface_emission_for(surface: Surface, wavenumber_cm):
@@ -233,6 +298,7 @@ def brightness_temperature(
     cnvcfr=None,
     cloud_fraction=None,
     include_clouds: bool = True,
+    include_scattering: bool = False,
     coeff_path=None,
 ) -> ForwardResult:
     """Brightness temperature for one column, a batch, or a WRF grid.
@@ -282,8 +348,13 @@ def brightness_temperature(
         Overrides the constant IR emissivities.
     include_clouds : bool
         When false, hydrometeor optical depth is omitted.
+    include_scattering : bool
+        With official coefficients, run ADA. The default is the
+        no-scattering emission solution. Without coefficients the flag
+        is ignored and recorded on ``notes``.
     coeff_path : path-like, optional
-        Recorded on the result. Coefficient binaries are not read.
+        Directory of CRTM coefficient binaries. Falls back to
+        :func:`crtm_py.coeffs.coeff_path`.
 
     Returns
     -------
@@ -292,10 +363,11 @@ def brightness_temperature(
 
     Notes
     -----
-    Gas optical depth is a synthetic grey gas. Cloud optical depth is
-    geometric optics with no scattering. Do not compare these values to
-    ``unipost.exe`` channel by channel. The profile conversion, effective
-    radius and zenith angle do follow ``CALRAD``.
+    Profile conversion, effective radius and zenith angle follow
+    ``CALRAD``. With SpcCoeff and ODPS TauCoeff the radiance follows
+    CRTM v2.4 for the loaded channels. Without them the optical depth is
+    a synthetic grey gas plus geometric-optics cloud extinction, and the
+    temperatures are not CRTM output.
     """
     atmosphere = atmosphere_from_upp(
         pressure_interface,
@@ -362,4 +434,4 @@ def brightness_temperature(
         sensor_scan_angle=np.zeros(n),
     )
     model = ForwardModel(sensor, channels, coeff_path=coeff_path, include_clouds=include_clouds)
-    return model.run(atmosphere, surface, geometry)
+    return model.run(atmosphere, surface, geometry, include_scattering=include_scattering)

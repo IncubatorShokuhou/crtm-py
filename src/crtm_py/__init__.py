@@ -3,14 +3,13 @@
 Numerics that UPP computes before ``CRTM_Forward`` follow
 ``CALRAD_WCLOUD_newcrtm.f`` in NOAA-EMC/UPP tag ``dtc_post_v4.1.0``:
 absorber units, hydrometeor column water, ``EFFR``, land-type tables and
-the geostationary zenith angle. The radiative transfer is the CRTM
-no-scattering emission solution (isothermal layers, plane-parallel
-secant, Lambertian diffusivity).
+the geostationary zenith angle.
 
-Gas optical depth is a synthetic grey gas. Cloud extinction is
-geometric optics. Neither uses the official coefficient binaries, so
-the brightness temperatures are not CRTM and will not match
-``unipost.exe``. See the package README for the module roadmap.
+When a coefficient directory supplies SpcCoeff and ODPS TauCoeff, gas
+optical depth, CloudCoeff cloud optics, Nalli sea emissivity, NPOESS land
+emissivity and the emission or ADA solution follow CRTM v2.4. Without
+those files the optical depth is a synthetic grey gas and the brightness
+temperatures are not CRTM output.
 """
 
 from crtm_py.atmosphere import Atmosphere, atmosphere_from_upp
