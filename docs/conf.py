@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.abspath("../src"))
 
 project = "crtm-py"
 author = "crtm-py contributors"
-release = "0.1.0"
+release = "0.1.1"
 version = "0.1"
 
 extensions = [

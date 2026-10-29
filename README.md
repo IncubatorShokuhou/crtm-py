@@ -2,15 +2,15 @@
 
 UPP v4.1 里 WRF-ARW 模拟卫星亮温用的 CRTM 前向过程，纯 Python / NumPy 重写。对齐 NOAA-EMC/UPP 标签 `dtc_post_v4.1.0` 的 `sorc/ncep_post.fd/CALRAD_WCLOUD_newcrtm.f`。传感器是 GOES-16/17 ABI 红外通道 7–16（`abi_g16`、`abi_g17`；UPP 在找不到 `abi_g16.SpcCoeff.bin` 时退回 `abi_gr`）。
 
-给 [upp-py](https://github.com/IncubatorShokuhou/upp-py) 做可选依赖。安装名是 `crtm-py`，导入名是 `crtm_py`，版本 `0.1.0`。`upp-py[bt]` 以后可以写：
+给 [upp-py](https://github.com/IncubatorShokuhou/upp-py) 做可选依赖。安装名是 `crtm-py`，导入名是 `crtm_py`，版本 `0.1.1`。`upp-py[bt]` 以后可以写：
 
 ```text
 crtm-py @ git+https://github.com/IncubatorShokuhou/crtm-py
 ```
 
-打上 `v0.1.0` 标签之后，把 URL 末尾改成 `@v0.1.0`。发到 PyPI 之后则是 `crtm-py>=0.1`。
+打上 `v0.1.1` 标签之后，把 URL 末尾改成 `@v0.1.1`。发到 PyPI 之后则是 `crtm-py>=0.1.1`。从 git 分支安装时版本号要变，否则 pip 可能沿用已经装过的 `0.1.0`。
 
-**English.** Pure-Python / NumPy port of the CRTM forward path UPP v4.1 uses for WRF-ARW ABI infrared brightness temperature. With official coefficients, ABI G16 channels 7–16 stay within 0.001 K of gfortran `libcrtm` (REAL64) on the CRTM clear-sky profile, including 60° zenith, land, liquid cloud and ice over liquid. Without coefficient files the package still runs a synthetic grey gas.
+**English.** Pure-Python / NumPy port of the CRTM forward path UPP v4.1 uses for WRF-ARW ABI infrared brightness temperature. With official coefficients, ABI G16 channels 7–16 stay within 0.001 K of gfortran `libcrtm` (REAL64) on the CRTM clear-sky profile, including 60° zenith, land, liquid cloud and ice over liquid. Without coefficient files the package still runs a synthetic grey gas. A 199×199 field with liquid cloud in every column, scattering on, takes about 83 s on one thread (`chunk_size=256`).
 
 ## 安装
 
@@ -72,7 +72,7 @@ print(result.optical_depth_model)
 
 送进 `ASYMTX` 的相函数矩阵本身不对称，和转置的差可以到 70 以上。`CRTM_Utility` 里 `ASYMTX` 的说明写的是：解一个事先知道本征值为实数的实不对称矩阵。它不是对称本征分解。以前说“CRTM 假设矩阵对称”是错的。
 
-和 Fortran 对不上的第一处是云光学插值。`Get_Cloud_Opt_IR` 用 `Find_Random_Index` 加 `LPoly`，四个节点上两段二次多项式混在一起。之前这里用了相邻两点的线性插值，消光、单次散射反照率、Legendre 系数和 delta 截断一起偏了，相函数矩阵从这里开始分叉。求积点的数值是对的，但 Fortran 把最小的余弦放在前面；`Normalize_Phase` 从第一个流开始归一化，顺序反了，归一化之后的 `Pff`/`Pbb` 就不是同一个矩阵。这两处改完，同一层的 `HH`、本征值和本征向量与 Fortran 的 `ASYMTX` 一致。本征步按 `ASYMTX` 的实数算法写，不再对复数本征值取实部。
+和 Fortran 对不上的第一处是云光学插值。`Get_Cloud_Opt_IR` 用 `Find_Random_Index` 加 `LPoly`，四个节点上两段二次多项式混在一起。之前这里用了相邻两点的线性插值，消光、单次散射反照率、Legendre 系数和 delta 截断一起偏了，相函数矩阵从这里开始分叉。求积点的数值是对的，但 Fortran 把最小的余弦放在前面；`Normalize_Phase` 从第一个流开始归一化，顺序反了，归一化之后的 `Pff`/`Pbb` 就不是同一个矩阵。这两处改完，同一层的 `HH`、本征值和本征向量与 Fortran 的 `ASYMTX` 一致。逐柱路径按 `ASYMTX` 的实数算法写。批量路径用 `numpy.linalg.eig`，说明在下面的速度一节。
 
 陆地发射率同样用这套四点二次插值。两点线性插值时，晴空陆地通道 7 差 0.13 K；改完之后是 0.001 K。
 
@@ -126,6 +126,36 @@ https://bin.ssec.wisc.edu/pub/s4/CRTM/file/crtm_coefficients_jedi_release_2.4.0.
 ```
 
 `crtm-py fetch --list` 里的键是 `2.4.0-jedi`。
+
+## 速度
+
+`brightness_temperature` 和 `ForwardModel.run` 按 `chunk_size` 分块，缺省 256 列。一块里的柱、通道、层在同一个数组里算气体光学厚度、发射率、Planck 和无散射发射。系数读一次，插值节点留在缓存里。
+
+云水不超过 1e-6 kg/m² 的层不查 `CloudCoeff`。单次散射反照率不超过 1e-10 的层用对角的发射算子。整柱都没有散射时走无散射的发射公式。Legendre 流数按这一列自己的最大有效半径和该通道的波数算，和逐列的 `layer_cloud_optics` 一样。同一块里流数相同的通道放在一起做本征分解。半径只在小于等于 0 时换成云表的第一个节点，这个替换不参与流数。一块里要散射的层叠成 `numpy.linalg.eig`，单次调用最多 8192 个矩阵。`HH` 不对称，本征值是实数。排好序之后和 `ASYMTX` 大约差 1e-12，本征向量差一个比例。加层用的反射率和透过率不看这个比例。传感器天顶角落在高斯节点上时，那一柱仍用逐柱的 `ASYMTX`。
+
+`n_jobs` 缺省 1。大于 1 时用进程池把块分出去。加速来自块里的数组运算。进程数大于 1 时把 `OMP_NUM_THREADS` 设成 1。
+
+改前有两组成绩，都当作基准：
+
+* Carr Fire 的 wrfout，199×199 列、79 层、ABI 7–16、散射开。main 上大约 139–169 ms/列/核，8 核全场墙钟 11–14 分钟。`cProfile` 的时间在 `ada_radiance`。
+* 逐柱路径在下面这条测试廓线上，晴空大约 10 ms/列，液水云大约 64 ms/列，冰云叠液水大约 167 ms/列。39601 列全是液水云时，单线程大约 40 分钟。
+
+改后的表在这台机器上测：4 核 Intel Xeon（KVM），Python 3.12.3，NumPy 1.26.4，`OMP_NUM_THREADS=1`，`chunk_size=256`。廓线是 CRTM 晴空测试的 92 层，重复 N 次。液水在 700–900 hPa，0.05 kg/m²，半径 10 µm。`mixed` 只给偶数柱放这份云。脚本是 `benchmarks/bench_abi.py --full`。
+
+| 列数 | 晴空 | 每列液水 | 偶数柱液水 |
+| --- | ---: | ---: | ---: |
+| 1 | 0.004 秒，3.62 ms/列 | 0.012 秒，12.2 ms/列 | 0.012 秒，12.1 ms/列 |
+| 100 | 0.021 秒，0.208 ms/列 | 0.216 秒，2.16 ms/列 | 0.115 秒，1.15 ms/列 |
+| 1000 | 0.274 秒，0.274 ms/列 | 2.16 秒，2.16 ms/列 | 1.18 秒，1.18 ms/列 |
+| 39601 | 11.2 秒，0.283 ms/列 | 82.5 秒，2.08 ms/列 | 46.9 秒，1.19 ms/列 |
+
+同一台机器、4 个进程（`n_jobs=4`，`OMP_NUM_THREADS=1`），39601 列每列都有液水，墙钟 23.2 秒。这台机器是 4 核，8 核没有重测。
+
+这张表里的云在每根有云柱上落在同样的几层。Carr Fire 的云在水平方向上不齐：一块里某一层可能只有少数柱有云。现在只对单次散射反照率超过阈值的柱和通道做本征分解，也只在有云水的层上查表。改前的批量版本（层掩膜还没做，`chunk_size=512`）把 39601 列全液水跑完是 121 秒；上表同一档是 83 秒。
+
+单线程、每列都有液水的 39601 列是这张表里最慢的一档，大约一分半。Carr Fire 场里晴空柱和有云柱混在一起，单线程会落在晴空的 11 秒和全液水的 83 秒之间，具体看云量。层数也不同：那次 wrfout 是 79 层，这张表的柱在补上标准大气之后大约 100 层。
+
+七个 Fortran 个例的最大差仍在 0.001 K 以内（实测最大 0.0008 K）。同一块里的结果和逐柱结果、`n_jobs=2` 和 `n_jobs=1`，差都在 1e-6 K 以内。
 
 ## 还没做
 

@@ -122,6 +122,8 @@ class ForwardModel:
         geometry: Geometry,
         *,
         include_scattering: bool = False,
+        chunk_size: int = 256,
+        n_jobs: int = 1,
     ) -> ForwardResult:
         """Integrate one batch. Arrays on the three arguments are top-down."""
         if atmosphere.n_profiles != surface.n_profiles:
@@ -132,7 +134,9 @@ class ForwardModel:
             raise ValueError("sensor zenith must have one angle per profile")
         loaded = _loaded_coefficients(self.sensor.sensor_id, self.coeff_path)
         if loaded is not None:
-            return _run_crtm(self, atmosphere, surface, geometry, loaded, include_scattering)
+            return _run_crtm(
+                self, atmosphere, surface, geometry, loaded, include_scattering, chunk_size, n_jobs
+            )
         _warn_once()
         wn = np.array([self.sensor.channels[c] for c in self.channels], dtype=np.float64)
         valid = geometry.valid_zenith & np.isfinite(atmosphere.temperature).all(axis=1)
@@ -190,7 +194,7 @@ def _loaded_coefficients(sensor_id: str, explicit):
         return None
 
 
-def _run_crtm(model, atmosphere, surface, geometry, loaded, include_scattering: bool):
+def _run_crtm(model, atmosphere, surface, geometry, loaded, include_scattering: bool, chunk_size: int, n_jobs: int):
     if not model.include_clouds:
         atmosphere = replace(atmosphere, clouds=())
     valid = geometry.valid_zenith & np.isfinite(atmosphere.temperature).all(axis=1)
@@ -205,6 +209,8 @@ def _run_crtm(model, atmosphere, surface, geometry, loaded, include_scattering: 
         safe_geometry,
         model.channels,
         scattering=include_scattering,
+        chunk_size=chunk_size,
+        n_jobs=n_jobs,
     )
     tb = np.where(valid[:, None], tb, np.nan)
     rad = np.where(valid[:, None], rad, np.nan)
@@ -299,6 +305,8 @@ def brightness_temperature(
     cloud_fraction=None,
     include_clouds: bool = True,
     include_scattering: bool = False,
+    chunk_size: int = 256,
+    n_jobs: int = 1,
     coeff_path=None,
 ) -> ForwardResult:
     """Brightness temperature for one column, a batch, or a WRF grid.
@@ -352,6 +360,15 @@ def brightness_temperature(
         With official coefficients, run ADA. The default is the
         no-scattering emission solution. Without coefficients the flag
         is ignored and recorded on ``notes``.
+    chunk_size : int
+        Number of columns per vectorized block. Smaller values use less
+        memory. The default is 256. Inside a block, ``CloudCoeff`` and
+        the ADA eigenstep run only on layers that contain cloud.
+    n_jobs : int
+        Process-pool workers for those blocks. The default, 1, keeps the
+        work in this process. The main speedup is the vectorized block.
+        Set ``OMP_NUM_THREADS=1`` when ``n_jobs`` is above 1 so each
+        process does not start its own BLAS pool.
     coeff_path : path-like, optional
         Directory of CRTM coefficient binaries. Falls back to
         :func:`crtm_py.coeffs.coeff_path`.
@@ -434,4 +451,11 @@ def brightness_temperature(
         sensor_scan_angle=np.zeros(n),
     )
     model = ForwardModel(sensor, channels, coeff_path=coeff_path, include_clouds=include_clouds)
-    return model.run(atmosphere, surface, geometry, include_scattering=include_scattering)
+    return model.run(
+        atmosphere,
+        surface,
+        geometry,
+        include_scattering=include_scattering,
+        chunk_size=chunk_size,
+        n_jobs=n_jobs,
+    )
