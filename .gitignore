@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+docs/_build/
+.cache/
+
+# Official CRTM coefficient binaries and fix tarballs stay out of git.
+*.SpcCoeff.bin
+*.TauCoeff.bin
+*Coeff.bin
+*.tgz
+*.tar.gz
+crtm_py_manifest.json
