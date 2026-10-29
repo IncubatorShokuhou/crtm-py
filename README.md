@@ -10,7 +10,7 @@ crtm-py @ git+https://github.com/IncubatorShokuhou/crtm-py
 
 打上 `v0.1.0` 标签之后，把 URL 末尾改成 `@v0.1.0`。发到 PyPI 之后则是 `crtm-py>=0.1`。
 
-**English.** Pure-Python / NumPy port of the CRTM forward path UPP v4.1 uses for WRF-ARW ABI infrared brightness temperature. With SpcCoeff, ODPS TauCoeff, CloudCoeff, Nalli water emissivity and NPOESS land emissivity, ABI G16 channels 7–16 follow CRTM v2.4. On the CRTM 92-layer profile the clear-sky difference from gfortran `libcrtm` (REAL64) is at most 0.059 K. A liquid cloud at nadir stays within 0.045 K; channel 7 is 0.0004 K. Without coefficient files the package still runs a synthetic grey gas.
+**English.** Pure-Python / NumPy port of the CRTM forward path UPP v4.1 uses for WRF-ARW ABI infrared brightness temperature. With official coefficients, ABI G16 channels 7–16 stay within 0.001 K of gfortran `libcrtm` (REAL64) on the CRTM clear-sky profile, including 60° zenith, land, liquid cloud and ice over liquid. Without coefficient files the package still runs a synthetic grey gas.
 
 ## 安装
 
@@ -57,32 +57,18 @@ print(result.optical_depth_model)
 
 系数放进 `CRTM_PY_COEFF_DIR` 之后，`abi_g16` 走 ODPS，不再走合成灰体。对拍用的是 JCSDA `v2.4.0` 用 gfortran、`REAL64` 编出来的 `libcrtm.so`。廓线是 CRTM 自带晴空测试的 92 层（`test_ClearSky/Load_Atm_Data.inc` 第一条）。海面是 Nalli，风速 5 m/s，水温 290 K，太阳天顶角 180°。
 
-下表是 Python 减 Fortran，单位 K。有云个例在 700–900 hPa 放液水 0.05 kg/m²，有效半径 10 µm，散射打开。
+有云个例在 700–900 hPa 放液水 0.05 kg/m²，有效半径 10 µm，散射打开。冰云在 300–500 hPa，0.02 kg/m²，半径 20 µm。七种情形、十个通道，Python 减 Fortran 的最大绝对值是 0.0008 K。
 
-| 通道 | 晴空 0° | 晴空 30° | 有云 0° |
-| ---: | ---: | ---: | ---: |
-| 7 | -0.001 | -0.001 | -0.000 |
-| 8 | -0.012 | -0.014 | -0.012 |
-| 9 | -0.004 | -0.006 | -0.005 |
-| 10 | +0.014 | +0.013 | +0.009 |
-| 11 | +0.001 | +0.002 | +0.000 |
-| 12 | +0.059 | +0.055 | -0.045 |
-| 13 | +0.001 | +0.001 | -0.000 |
-| 14 | +0.001 | +0.001 | +0.000 |
-| 15 | +0.001 | +0.001 | +0.000 |
-| 16 | +0.003 | +0.003 | -0.003 |
+| 情形 | 最大 \|Python − Fortran\| |
+| --- | ---: |
+| 晴空海面，天顶角 0° / 30° / 60° | 0.0002 / 0.0002 / 0.0008 K |
+| 晴空陆地，NPOESS 类别 1，290 K | 0.00001 K 以内 |
+| 液水云，天顶角 0° / 60° | 0.00001 K 以内 |
+| 冰云叠在液水云上，天顶角 0° | 0.00001 K 以内 |
 
-晴空最大差 0.059 K（通道 12）。液水云天顶角 0° 最大差也是通道 12，0.045 K。通道 7 有云是 -0.0004 K。
+测试廓线最上面一层是 0.714 hPa。CRTM 在它上面用美国标准大气补到 0.005 hPa，再把补上的最下层平移，让温度和水汽、臭氧接到用户廓线。通道 12 看的是臭氧，这段平流层以前没有，天底就差 0.059 K；60° 路径更长，差到 0.122 K；上面再放冰云，差到 0.142 K。
 
-另外三条：
-
-| 情形 | 最大 \|Python − Fortran\| | 落在哪 |
-| --- | ---: | --- |
-| 晴空陆地，NPOESS 类别 1，皮肤温度 290 K，天顶角 0° | 0.054 K | 通道 12 |
-| 同一条液水云，天顶角 60° | 0.122 K | 通道 12 |
-| 300–500 hPa 冰云 0.02 kg/m²、半径 20 µm，再加上上面的液水云 | 0.142 K | 通道 12 |
-
-通道 7 在这三条里都在 0.001 K 以内。超过 0.1 K 的只有通道 12 的斜路径和冰云。晴空天顶角 0° 时这个通道已经差 0.059 K，斜路径和上层冰云把同一截气体光学厚度的差放大了。
+预报量里还有一处。从第二层起，Fortran 的气压权重用层底气压 `Ref_Level_Pressure(k)`。之前写成了层顶。参考廓线上吸收物和参考值一样，这个比值是 1，错不出来。换到这条 ECMWF 廓线，臭氧的累积权重偏了，通道 12 的光学厚度跟着偏。干气体和水汽连续区不用这个臭氧权重，所以其他通道几乎看不出来。
 
 送进 `ASYMTX` 的相函数矩阵本身不对称，和转置的差可以到 70 以上。`CRTM_Utility` 里 `ASYMTX` 的说明写的是：解一个事先知道本征值为实数的实不对称矩阵。它不是对称本征分解。以前说“CRTM 假设矩阵对称”是错的。
 
@@ -143,14 +129,13 @@ https://bin.ssec.wisc.edu/pub/s4/CRTM/file/crtm_coefficients_jedi_release_2.4.0.
 
 ## 还没做
 
-1. 通道 12 在天顶角 60° 和上层冰云时的差，分别是 0.122 K 和 0.142 K。来自气体光学厚度在用户层上的剩余差，不是 ADA 本征步。
-2. 通道 7 的白天太阳反射。
-3. 冰、雪发射率系数。现在仍是常数。
-4. 单独的 ODAS 气体路径。ABI G16 的 TauCoeff 是 ODPS。
-5. 最大随机云重叠。`cloud_fraction` 在 CRTM 里还会把过小的云水清零，这里没有做这步。
-6. 气溶胶、微波仪器。第 1 组微量气体预报量会直接报错。
-7. NetCDF 系数。Fortran 顺序无格式文件的大端和小端都能读。
-8. 和 `upp-py` 接线。这一版不改那个仓库。
+1. 通道 7 的白天太阳反射。
+2. 冰、雪发射率系数。现在仍是常数。
+3. 单独的 ODAS 气体路径。ABI G16 的 TauCoeff 是 ODPS。
+4. 最大随机云重叠。`cloud_fraction` 在 CRTM 里还会把过小的云水清零，这里没有做这步。
+5. 气溶胶、微波仪器。第 1 组微量气体预报量会直接报错。
+6. NetCDF 系数。Fortran 顺序无格式文件的大端和小端都能读。
+7. 和 `upp-py` 接线。这一版不改那个仓库。
 
 CI 下载 JEDI 系数，用 `tests/test_crtm_reference.py` 里记下的 Fortran 亮温回归。不在 CI 里重编 `libcrtm`：本机已经用 JCSDA `v2.4.0`、gfortran、`REAL64` 跑过同一条廓线，数字写在测试里。ecbuild 要求 `project()` 带版本号，上游 `CMakeLists.txt` 要改一行才能编过。
 

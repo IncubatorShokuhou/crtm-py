@@ -19,6 +19,7 @@ from crtm_py.constants import EMIS_ICE, EMIS_SNOW
 from crtm_py.emis import land_emissivity, load_irland, load_irwater, water_emissivity
 from crtm_py.odps import gaseous_nadir_od, load_odps_file
 from crtm_py.spc import channel_radiance, channel_temperature, load_spccoeff
+from crtm_py.toa import prepend_standard_atmosphere
 
 _CACHE: dict[tuple[str, str], "CRTMCoeff"] = {}
 
@@ -124,14 +125,20 @@ def brightness_crtm(coeff: CRTMCoeff, atmosphere, surface, geometry, bands, *, s
     for i in range(n):
         zen = float(geometry.sensor_zenith_angle[i])
         mu = np.cos(np.deg2rad(zen))
-        level_p = atmosphere.level_pressure_hpa[i]
-        gas = gaseous_nadir_od(
-            coeff.odps,
-            level_p,
+        level_p, pressure, temperature, h2o, o3, n_added = prepend_standard_atmosphere(
+            atmosphere.level_pressure_hpa[i],
             atmosphere.pressure_hpa[i],
             atmosphere.temperature[i],
             atmosphere.h2o_gkg[i],
             atmosphere.o3_ppmv[i],
+        )
+        gas = gaseous_nadir_od(
+            coeff.odps,
+            level_p,
+            pressure,
+            temperature,
+            h2o,
+            o3,
             zen,
             bands,
         )
@@ -143,7 +150,7 @@ def brightness_crtm(coeff: CRTMCoeff, atmosphere, surface, geometry, bands, *, s
             phase = None
             if scattering and coeff.cloud is not None and atmosphere.clouds:
                 cloud_tau, cloud_ssa, cloud_phase = _clouds_one_profile(
-                    coeff.cloud, wn, atmosphere, i, scattering=True
+                    coeff.cloud, wn, atmosphere, i, scattering=True, n_added=n_added
                 )
                 ssa = np.divide(
                     cloud_ssa * cloud_tau, tau + cloud_tau, out=np.zeros_like(tau), where=(tau + cloud_tau) > 0
@@ -151,9 +158,11 @@ def brightness_crtm(coeff: CRTMCoeff, atmosphere, surface, geometry, bands, *, s
                 tau = tau + cloud_tau
                 phase = cloud_phase
             elif coeff.cloud is not None and atmosphere.clouds:
-                cloud_tau, _, _ = _clouds_one_profile(coeff.cloud, wn, atmosphere, i, scattering=False)
+                cloud_tau, _, _ = _clouds_one_profile(
+                    coeff.cloud, wn, atmosphere, i, scattering=False, n_added=n_added
+                )
                 tau = tau + cloud_tau
-            planck_layer = channel_radiance(coeff.spc, idx, atmosphere.temperature[i])
+            planck_layer = channel_radiance(coeff.spc, idx, temperature)
             # Coverage-weighted skin radiance uses each surface temperature.
             emis = float(_coverage_emissivity(coeff, idx, zen, surface)[i])
             skin = _skin_radiance(coeff, idx, surface, i, emis)
@@ -178,18 +187,20 @@ def brightness_crtm(coeff: CRTMCoeff, atmosphere, surface, geometry, bands, *, s
     return tb, rad
 
 
-def _clouds_one_profile(cloud_coeff, wavenumber, atmosphere, index, *, scattering: bool):
+def _clouds_one_profile(cloud_coeff, wavenumber, atmosphere, index, *, scattering: bool, n_added: int):
     clouds = []
+    n_layers = atmosphere.n_layers + n_added
+    pad = np.zeros(n_added, dtype=np.float64)
     for cloud in atmosphere.clouds:
         clouds.append(
             type("C", (), {
                 "cloud_type": cloud.cloud_type,
-                "water_content": cloud.water_content[index],
-                "effective_radius": cloud.effective_radius[index],
+                "water_content": np.concatenate([pad, cloud.water_content[index]]),
+                "effective_radius": np.concatenate([pad, cloud.effective_radius[index]]),
             })()
         )
     return layer_cloud_optics(
-        cloud_coeff, wavenumber, clouds, atmosphere.n_layers, scattering=scattering
+        cloud_coeff, wavenumber, clouds, n_layers, scattering=scattering
     )
 
 

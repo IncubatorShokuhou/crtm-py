@@ -33,10 +33,13 @@ PROFILE = np.load(ROOT / "tests/data/abi_g16_clearsky_92.npz")
 
 # Fortran CRTM v2.4.0, channels 7..16.
 CLEAR_ZENITH_0 = np.array(
-    [287.06976, 237.32495, 241.87112, 250.34722, 283.87522, 260.85869, 287.07331, 287.06702, 284.16769, 268.27063]
+    [287.06975635, 237.32494695, 241.87112134, 250.34721665, 283.87522321, 260.85868546, 287.07330590, 287.06701774, 284.16769296, 268.27063461]
 )
 CLEAR_ZENITH_30 = np.array(
-    [286.72056, 236.84598, 241.17731, 249.21956, 283.26902, 259.04984, 286.69335, 286.68887, 283.54900, 266.92909]
+    [286.72056234, 236.84597641, 241.17731389, 249.21956220, 283.26902266, 259.04984180, 286.69335275, 286.68886743, 283.54899849, 266.92909081]
+)
+CLEAR_ZENITH_60 = np.array(
+    [284.40643907, 235.32903068, 238.83587086, 245.34332031, 279.73278222, 252.16232419, 283.97950231, 283.99996313, 279.54662119, 260.81019756]
 )
 CLOUDY_ZENITH_0 = np.array(
     [251.81339, 237.30243, 241.49865, 246.55066, 253.34341, 244.92213, 254.33604, 254.52173, 254.26198, 249.84884]
@@ -118,9 +121,11 @@ def _tb(coeff_dir, zenith, clouds, scattering):
 def test_clear_sky_matches_fortran_crtm(coeff_dir):
     nadir, channels = _tb(coeff_dir, 0.0, (), False)
     slant, _ = _tb(coeff_dir, 30.0, (), False)
+    steep, _ = _tb(coeff_dir, 60.0, (), False)
     assert channels == tuple(range(7, 17))
-    assert np.max(np.abs(nadir - CLEAR_ZENITH_0)) < 0.1
-    assert np.max(np.abs(slant - CLEAR_ZENITH_30)) < 0.1
+    assert np.max(np.abs(nadir - CLEAR_ZENITH_0)) < 0.001
+    assert np.max(np.abs(slant - CLEAR_ZENITH_30)) < 0.001
+    assert np.max(np.abs(steep - CLEAR_ZENITH_60)) < 0.001
 
 
 def test_include_clouds_false_ignores_the_liquid_layer(coeff_dir):
@@ -155,7 +160,7 @@ def _land():
 
 def test_water_cloud_ada_against_fortran_crtm(coeff_dir):
     tb, _ = _tb(coeff_dir, 0.0, _liquid(), True)
-    assert np.max(np.abs(tb - CLOUDY_ZENITH_0)) < 0.1
+    assert np.max(np.abs(tb - CLOUDY_ZENITH_0)) < 0.001
 
 
 def test_land_clear_sky_matches_fortran_crtm(coeff_dir):
@@ -167,16 +172,12 @@ def test_land_clear_sky_matches_fortran_crtm(coeff_dir):
         include_scattering=False,
     )
     tb = np.asarray(result.brightness_temperature).reshape(-1)
-    assert np.max(np.abs(tb - LAND_CLEAR)) < 0.1
+    assert np.max(np.abs(tb - LAND_CLEAR)) < 0.001
 
 
 def test_water_cloud_at_60_degrees_matches_fortran_crtm(coeff_dir):
     tb, _ = _tb(coeff_dir, 60.0, _liquid(), True)
-    delta = tb - CLOUDY_ZENITH_60
-    # Channel 12 carries the clear-sky ozone residual; the slant path makes it larger.
-    assert abs(delta[0]) < 0.01
-    assert abs(delta[5]) < 0.15
-    assert np.max(np.abs(np.delete(delta, 5))) < 0.05
+    assert np.max(np.abs(tb - CLOUDY_ZENITH_60)) < 0.001
 
 
 def test_ice_and_water_clouds_match_fortran_crtm(coeff_dir):
@@ -184,10 +185,7 @@ def test_ice_and_water_clouds_match_fortran_crtm(coeff_dir):
     ice = np.where((pressure >= 300.0) & (pressure <= 500.0), 0.02, 0.0)
     clouds = _liquid() + (Cloud("ice", ice.reshape(1, -1), np.full((1, pressure.size), 20.0)),)
     tb, _ = _tb(coeff_dir, 0.0, clouds, True)
-    delta = tb - ICE_AND_WATER
-    assert abs(delta[0]) < 0.01
-    assert abs(delta[5]) < 0.2
-    assert np.max(np.abs(np.delete(delta, 5))) < 0.05
+    assert np.max(np.abs(tb - ICE_AND_WATER)) < 0.001
 
 
 def test_big_endian_npoess_land_matches_little_endian(coeff_dir):

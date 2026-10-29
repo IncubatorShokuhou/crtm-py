@@ -400,10 +400,11 @@ def _predictors(group, temperature, absorber, ref_level_p, ref_t, ref_a, secant)
     gatzp_ref = np.zeros(n_abs)
     gatzp_sum = np.zeros(n_abs)
     for k in range(n_layers):
+        # Fortran layer k>=2 weights by the lower interface, Ref_Level_Pressure(k).
         if k == 0:
             pdp = ref_level_p[0] * (ref_level_p[1] - ref_level_p[0])
         else:
-            pdp = ref_level_p[k] * (ref_level_p[k] - ref_level_p[k - 1])
+            pdp = ref_level_p[k + 1] * (ref_level_p[k + 1] - ref_level_p[k])
         tz_ref += ref_t[k]
         tz_sum += temperature[k]
         tz[k] = tz_sum / tz_ref

@@ -54,6 +54,9 @@ API
 .. automodule:: crtm_py.lagrange
    :members:
 
+.. automodule:: crtm_py.toa
+   :members:
+
 .. automodule:: crtm_py.emis
    :members:
 
