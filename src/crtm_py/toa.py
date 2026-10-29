@@ -164,3 +164,75 @@ def prepend_standard_atmosphere(level_pressure_hpa, pressure_hpa, temperature, h
         np.concatenate([o_layer, o3]),
         n,
     )
+
+
+def prepend_standard_atmosphere_batch(level_pressure_hpa, pressure_hpa, temperature, h2o_gkg, o3_ppmv):
+    """Batch form of :func:`prepend_standard_atmosphere`.
+
+    Inputs are ``(n_profile, n_level)`` and ``(n_profile, n_layer)``. Profiles
+    that share a pressure grid share the added-layer geometry; the temperature
+    and absorber shift is still per column.
+    """
+    level = np.asarray(level_pressure_hpa, dtype=np.float64)
+    pressure = np.asarray(pressure_hpa, dtype=np.float64)
+    temp = np.asarray(temperature, dtype=np.float64)
+    h2o = np.asarray(h2o_gkg, dtype=np.float64)
+    o3 = np.asarray(o3_ppmv, dtype=np.float64)
+    if level.ndim == 1:
+        level = level.reshape(1, -1)
+        pressure = pressure.reshape(1, -1)
+        temp = temp.reshape(1, -1)
+        h2o = h2o.reshape(1, -1)
+        o3 = o3.reshape(1, -1)
+    n_add = extra_layer_count(float(level[0, 0]))
+    if n_add < 1 or pressure.shape[1] < 2:
+        return level, pressure, temp, h2o, o3, 0
+    if not (np.allclose(level, level[0]) and np.allclose(pressure, pressure[0])):
+        parts = [
+            prepend_standard_atmosphere(level[i], pressure[i], temp[i], h2o[i], o3[i])
+            for i in range(level.shape[0])
+        ]
+        return (
+            np.stack([p[0] for p in parts]),
+            np.stack([p[1] for p in parts]),
+            np.stack([p[2] for p in parts]),
+            np.stack([p[3] for p in parts]),
+            np.stack([p[4] for p in parts]),
+            parts[0][5],
+        )
+    one = prepend_standard_atmosphere(level[0], pressure[0], temp[0], h2o[0], o3[0])
+    # Geometry is shared. Rebuild the shift from each column so the splice matches.
+    pl = _LEVEL_PRESSURE_HPA[: n_add + 1].copy()
+    tl = _LEVEL_TEMPERATURE[: n_add + 1].copy()
+    hl = _LEVEL_H2O_GKG[: n_add + 1].copy()
+    ol = _LEVEL_O3_PPMV[: n_add + 1].copy()
+    top = float(level[0, 0])
+    span = np.log(pl[n_add]) - np.log(pl[n_add - 1])
+    lpoly = (np.log(top) - np.log(pl[n_add - 1])) / span
+    pl[n_add] = top
+    tl[n_add] = tl[n_add - 1] + (tl[n_add] - tl[n_add - 1]) * lpoly
+    hl[n_add] = hl[n_add - 1] + (hl[n_add] - hl[n_add - 1]) * lpoly
+    ol[n_add] = ol[n_add - 1] + (ol[n_add] - ol[n_add - 1]) * lpoly
+    p_layer = (pl[1:] - pl[:-1]) / np.log(pl[1:] / pl[:-1])
+    t_layer = 0.5 * (tl[:-1] + tl[1:])
+    h_layer = 0.5 * (hl[:-1] + hl[1:])
+    o_layer = 0.5 * (ol[:-1] + ol[1:])
+    shift = (np.log(p_layer[-1]) - np.log(pressure[0, 0])) / (np.log(pressure[0, 1]) - np.log(pressure[0, 0]))
+
+    def _shift(layer, column):
+        target = column[:, 0] + (column[:, 1] - column[:, 0]) * shift
+        return layer + (target - layer[-1])[:, None]
+
+    t_add = _shift(t_layer, temp)
+    h_add = np.maximum(_shift(h_layer, h2o), _MIN_ABSORBER)
+    o_add = np.maximum(_shift(o_layer, o3), _MIN_ABSORBER)
+    level_out = np.broadcast_to(np.concatenate([pl[:n_add], level[0]]), (level.shape[0], n_add + level.shape[1])).copy()
+    pressure_out = np.broadcast_to(np.concatenate([p_layer, pressure[0]]), (level.shape[0], n_add + pressure.shape[1])).copy()
+    return (
+        level_out,
+        pressure_out,
+        np.concatenate([t_add, temp], axis=1),
+        np.concatenate([h_add, h2o], axis=1),
+        np.concatenate([o_add, o3], axis=1),
+        n_add,
+    )

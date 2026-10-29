@@ -13,13 +13,11 @@ from pathlib import Path
 
 import numpy as np
 
-from crtm_py.ada import ada_radiance
-from crtm_py.cloudlut import layer_cloud_optics, load_cloudcoeff
-from crtm_py.constants import EMIS_ICE, EMIS_SNOW
-from crtm_py.emis import land_emissivity, load_irland, load_irwater, water_emissivity
-from crtm_py.odps import gaseous_nadir_od, load_odps_file
-from crtm_py.spc import channel_radiance, channel_temperature, load_spccoeff
-from crtm_py.toa import prepend_standard_atmosphere
+from crtm_py.batch_forward import _Cloud, forward_chunk
+from crtm_py.cloudlut import load_cloudcoeff
+from crtm_py.emis import load_irland, load_irwater
+from crtm_py.odps import load_odps_file
+from crtm_py.spc import load_spccoeff
 
 _CACHE: dict[tuple[str, str], "CRTMCoeff"] = {}
 
@@ -82,155 +80,92 @@ def load_sensor(sensor_id: str, root) -> CRTMCoeff | None:
     return loaded
 
 
-def _coverage_emissivity(coeff: CRTMCoeff, band_index: int, zenith: float, surface) -> np.ndarray:
-    """One emissivity per profile, coverage-weighted."""
-    n = surface.n_profiles
-    wn = float(coeff.spc.wavenumber[band_index])
-    out = np.zeros(n, dtype=np.float64)
-    for i in range(n):
-        weights = np.array(
-            [
-                max(surface.water_coverage[i], 0.0),
-                max(surface.land_coverage[i], 0.0),
-                max(surface.ice_coverage[i], 0.0),
-                max(surface.snow_coverage[i], 0.0),
-            ]
-        )
-        if weights.sum() <= 0.0:
-            weights[1] = 1.0
-        weights /= weights.sum()
-        parts = np.zeros(4)
-        if coeff.water is not None:
-            parts[0] = water_emissivity(coeff.water, wn, zenith, float(surface.wind_speed[i]))
-        else:
-            parts[0] = 0.98
-        if coeff.land is not None:
-            parts[1] = land_emissivity(coeff.land, wn, int(surface.land_type[i]))
-        else:
-            parts[1] = 0.97
-        parts[2] = EMIS_ICE
-        parts[3] = EMIS_SNOW
-        if surface.emissivity is not None:
-            user = np.asarray(surface.emissivity, dtype=np.float64)
-            parts[:] = float(np.reshape(user, (-1,))[i] if user.size == n else user)
-        out[i] = float(np.dot(weights, parts))
-    return out
+def brightness_crtm(
+    coeff: CRTMCoeff,
+    atmosphere,
+    surface,
+    geometry,
+    bands,
+    *,
+    scattering: bool,
+    chunk_size: int = 256,
+    n_jobs: int = 1,
+):
+    """Brightness temperature, shape ``(n_profiles, n_channels)``.
 
-
-def brightness_crtm(coeff: CRTMCoeff, atmosphere, surface, geometry, bands, *, scattering: bool):
-    """Brightness temperature, shape ``(n_profiles, n_channels)``."""
+    Columns are integrated in chunks of ``chunk_size``. ``n_jobs`` above 1
+    farms those chunks out with ``concurrent.futures``. The default is one
+    process; the speedup is the vectorized chunk, not the process pool.
+    Scattering eigenvalues are computed only for layers with cloud.
+    """
     n = atmosphere.n_profiles
-    tb = np.empty((n, len(bands)), dtype=np.float64)
-    rad = np.empty_like(tb)
-    for i in range(n):
-        zen = float(geometry.sensor_zenith_angle[i])
-        mu = np.cos(np.deg2rad(zen))
-        level_p, pressure, temperature, h2o, o3, n_added = prepend_standard_atmosphere(
-            atmosphere.level_pressure_hpa[i],
-            atmosphere.pressure_hpa[i],
-            atmosphere.temperature[i],
-            atmosphere.h2o_gkg[i],
-            atmosphere.o3_ppmv[i],
-        )
-        gas = gaseous_nadir_od(
-            coeff.odps,
-            level_p,
-            pressure,
-            temperature,
-            h2o,
-            o3,
-            zen,
-            bands,
-        )
-        for ic, band in enumerate(bands):
-            idx = coeff.spc.channel_index(int(band))
-            wn = float(coeff.spc.wavenumber[idx])
-            tau = gas[:, ic].copy()
-            ssa = np.zeros(tau.shape)
-            phase = None
-            if scattering and coeff.cloud is not None and atmosphere.clouds:
-                cloud_tau, cloud_ssa, cloud_phase = _clouds_one_profile(
-                    coeff.cloud, wn, atmosphere, i, scattering=True, n_added=n_added
-                )
-                ssa = np.divide(
-                    cloud_ssa * cloud_tau, tau + cloud_tau, out=np.zeros_like(tau), where=(tau + cloud_tau) > 0
-                )
-                tau = tau + cloud_tau
-                phase = cloud_phase
-            elif coeff.cloud is not None and atmosphere.clouds:
-                cloud_tau, _, _ = _clouds_one_profile(
-                    coeff.cloud, wn, atmosphere, i, scattering=False, n_added=n_added
-                )
-                tau = tau + cloud_tau
-            planck_layer = channel_radiance(coeff.spc, idx, temperature)
-            # Coverage-weighted skin radiance uses each surface temperature.
-            emis = float(_coverage_emissivity(coeff, idx, zen, surface)[i])
-            skin = _skin_radiance(coeff, idx, surface, i, emis)
-            cosmic = float(coeff.spc.cosmic_background[idx])
-            streams = 0
-            if phase is not None:
-                # phase stores 0..n_legendre, and n_legendre is the Mie stream count.
-                streams = phase.shape[0] - 1
-            radiance = ada_radiance(
-                tau,
-                ssa,
-                phase,
-                planck_layer,
-                skin,
-                emis,
-                cosmic,
-                mu,
-                streams=streams,
-            )
-            rad[i, ic] = radiance
-            tb[i, ic] = float(channel_temperature(coeff.spc, idx, np.array([radiance]))[0])
+    chunk_size = max(int(chunk_size), 1)
+    jobs = n_jobs if n_jobs and n_jobs > 0 else 1
+    slices = [(start, min(start + chunk_size, n)) for start in range(0, n, chunk_size)]
+    payloads = [_payload(atmosphere, surface, geometry, bands, scattering, sl) for sl in slices]
+    if jobs == 1 or len(payloads) == 1:
+        parts = [_run_payload(coeff, item) for item in payloads]
+    else:
+        from concurrent.futures import ProcessPoolExecutor
+
+        parts = [None] * len(payloads)
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            futures = [pool.submit(_run_payload, coeff, item) for item in payloads]
+            for i, future in enumerate(futures):
+                parts[i] = future.result()
+    tb = np.concatenate([part[0] for part in parts], axis=0)
+    rad = np.concatenate([part[1] for part in parts], axis=0)
     return tb, rad
 
 
-def _clouds_one_profile(cloud_coeff, wavenumber, atmosphere, index, *, scattering: bool, n_added: int):
-    clouds = []
-    n_layers = atmosphere.n_layers + n_added
-    pad = np.zeros(n_added, dtype=np.float64)
-    for cloud in atmosphere.clouds:
-        clouds.append(
-            type("C", (), {
-                "cloud_type": cloud.cloud_type,
-                "water_content": np.concatenate([pad, cloud.water_content[index]]),
-                "effective_radius": np.concatenate([pad, cloud.effective_radius[index]]),
-            })()
-        )
-    return layer_cloud_optics(
-        cloud_coeff, wavenumber, clouds, n_layers, scattering=scattering
-    )
+def _payload(atmosphere, surface, geometry, bands, scattering, bounds):
+    start, stop = bounds
+    clouds = [
+        (cloud.cloud_type, cloud.water_content[start:stop], cloud.effective_radius[start:stop])
+        for cloud in atmosphere.clouds
+    ]
+    user_emis = None if surface.emissivity is None else np.asarray(surface.emissivity, dtype=np.float64)
+    if user_emis is not None and user_emis.shape[0] == atmosphere.n_profiles:
+        user_emis = user_emis[start:stop]
+    return {
+        "level": atmosphere.level_pressure_hpa[start:stop],
+        "pressure": atmosphere.pressure_hpa[start:stop],
+        "temperature": atmosphere.temperature[start:stop],
+        "h2o": atmosphere.h2o_gkg[start:stop],
+        "o3": atmosphere.o3_ppmv[start:stop],
+        "clouds": clouds,
+        "zenith": geometry.sensor_zenith_angle[start:stop],
+        "surface": {
+            "wind": surface.wind_speed[start:stop],
+            "land_type": surface.land_type[start:stop],
+            "water": surface.water_coverage[start:stop],
+            "land": surface.land_coverage[start:stop],
+            "ice": surface.ice_coverage[start:stop],
+            "snow": surface.snow_coverage[start:stop],
+            "water_t": surface.water_temperature[start:stop],
+            "land_t": surface.land_temperature[start:stop],
+            "ice_t": surface.ice_temperature[start:stop],
+            "snow_t": surface.snow_temperature[start:stop],
+            "emissivity": user_emis,
+        },
+        "bands": tuple(bands),
+        "scattering": scattering,
+    }
 
 
-def _skin_radiance(coeff, band_index, surface, index, emissivity):
-    """Planck radiance of the coverage-weighted skin temperature.
+def _run_payload(coeff, item):
+    clouds = [_Cloud(kind, water, radius) for kind, water, radius in item["clouds"]]
+    return forward_chunk(
+        coeff,
+        item["level"],
+        item["pressure"],
+        item["temperature"],
+        item["h2o"],
+        item["o3"],
+        clouds,
+        item["zenith"],
+        item["surface"],
+        item["bands"],
+        item["scattering"],
+    )
 
-    The emissivity is applied in the RT, so this returns ``B(T)`` of the
-    warmest contributing surface, weighted by coverage. Mixed pixels use
-    the coverage-weighted temperature. That is linear in T, which is what
-    a single-stream call can accept; fractional surfaces in CRTM are
-    separate RT runs. A pixel that is entirely one type matches CRTM.
-    """
-    weights = np.array(
-        [
-            max(surface.water_coverage[index], 0.0),
-            max(surface.land_coverage[index], 0.0),
-            max(surface.ice_coverage[index], 0.0),
-            max(surface.snow_coverage[index], 0.0),
-        ]
-    )
-    temps = np.array(
-        [
-            surface.water_temperature[index],
-            surface.land_temperature[index],
-            surface.ice_temperature[index],
-            surface.snow_temperature[index],
-        ]
-    )
-    if weights.sum() <= 0.0:
-        weights[1] = 1.0
-    weights /= weights.sum()
-    skin = float(np.dot(weights, temps))
-    return float(channel_radiance(coeff.spc, band_index, np.array(skin)))
